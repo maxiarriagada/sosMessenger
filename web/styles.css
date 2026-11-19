@@ -440,6 +440,14 @@ button {
   background: var(--warn);
 }
 
+.map-pin-sos {
+  width: 24px;
+  height: 24px;
+  border-width: 3px;
+  background: var(--danger);
+  box-shadow: 0 0 0 5px rgba(255, 107, 107, 0.3), 0 0 14px rgba(255, 107, 107, 0.8);
+}
+
 .leaflet-container {
   background: var(--surface-2);
   font: inherit;
@@ -811,6 +819,28 @@ button {
   color: var(--warn);
 }
 
+.msg-sos {
+  width: 100%;
+  max-width: 100%;
+  border-color: rgba(255, 107, 107, 0.6);
+  background: linear-gradient(150deg, rgba(255, 107, 107, 0.18), rgba(22, 32, 45, 0.96));
+  cursor: pointer;
+}
+
+.msg-sos:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+}
+
+.msg-pin {
+  margin-bottom: 5px;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .empty-state {
   padding: 34px 20px;
   color: var(--muted);
@@ -861,6 +891,15 @@ button {
   color: var(--accent);
 }
 
+.nav-btn-chat-alert .nav-icon {
+  fill: rgba(255, 107, 107, 0.18);
+  stroke: var(--danger);
+}
+
+.nav-btn-chat-alert span:not(.nav-badge) {
+  color: var(--danger);
+}
+
 .nav-btn-sos {
   border-color: rgba(255, 107, 107, 0.55);
   background: linear-gradient(135deg, rgba(255, 107, 107, 0.28), rgba(214, 69, 69, 0.16));
@@ -899,6 +938,63 @@ button {
   font-weight: 800;
   line-height: 15px;
   text-align: center;
+}
+
+.nav-badge-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.sos-modal {
+  width: min(92vw, 430px);
+  padding: 0;
+  border: 1px solid rgba(255, 107, 107, 0.55);
+  border-radius: 20px;
+  background: var(--bg-2);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.sos-modal::backdrop {
+  background: rgba(4, 8, 12, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+}
+
+.modal-card h2 {
+  margin: 0;
+  color: var(--danger);
+  font-size: 17px;
+}
+
+.sos-modal-text {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  border-radius: 13px;
+  background: rgba(255, 107, 107, 0.1);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.modal-coords {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 4px;
 }
 
 .toast {

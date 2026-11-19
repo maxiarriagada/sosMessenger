@@ -1,11 +1,11 @@
-const CACHE_NAME = 'lora-messenger-web-v6';
+const CACHE_NAME = 'lora-messenger-web-v7';
 
 const APP_SHELL = [
   './',
   './index.html',
-  './index.html?v=6',
-  './styles.css?v=6',
-  './app.js?v=6',
+  './index.html?v=7',
+  './styles.css?v=7',
+  './app.js?v=7',
   './lm_ble.js',
   './lm_chat_store.js',
   './lm_geo.js',

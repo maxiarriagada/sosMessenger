@@ -1,5 +1,6 @@
 const EARTH_RADIUS_M = 6371000;
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SO', 'O', 'NO'];
+const SOS_COORDS_RE = /^SOS[\s·:]*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i;
 
 function toRadians(degrees) {
   return (degrees * Math.PI) / 180;
@@ -108,6 +109,34 @@ export function formatMeters(value) {
 
 export function formatDistance(lat1, lon1, lat2, lon2) {
   return formatMeters(distanceMeters(lat1, lon1, lat2, lon2));
+}
+
+export function parseSosText(value) {
+  const text = String(value ?? '');
+  const match = SOS_COORDS_RE.exec(text);
+  if (!match) {
+    return null;
+  }
+  const lat = Number(match[1]);
+  const lon = Number(match[2]);
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon) ||
+    Math.abs(lat) > 90 ||
+    Math.abs(lon) > 180
+  ) {
+    return null;
+  }
+  const accuracyMatch = /±\s*(\d+(?:\.\d+)?)\s*m/i.exec(text);
+  const altitudeMatch = /alt\s*(-?\d+(?:\.\d+)?)\s*m/i.exec(text);
+  const clockMatch = /\b(\d{1,2}:\d{2}:\d{2})\b/.exec(text);
+  return {
+    lat,
+    lon,
+    accuracy: accuracyMatch ? Number(accuracyMatch[1]) : null,
+    altitude: altitudeMatch ? Number(altitudeMatch[1]) : null,
+    clock: clockMatch ? clockMatch[1] : null,
+  };
 }
 
 export function routeInfo(origin, target, heading) {

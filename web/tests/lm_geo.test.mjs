@@ -10,6 +10,7 @@ import {
   formatRelative,
   normalizeHeading,
   normalizeSigned,
+  parseSosText,
   relativeBearing,
   routeInfo,
 } from '../lm_geo.js';
@@ -101,4 +102,19 @@ test('routeInfo tolerates missing positions', () => {
   assert.equal(route.headingText, '—');
   assert.equal(route.relativeText, '—');
   assert.ok(Number.isNaN(route.bearing));
+});
+
+test('parseSosText extracts coordinates and metadata', () => {
+  const sos = parseSosText('SOS · -34.60372,-58.38159 · ±12 m · alt 25 m · 14:07:31');
+  closeTo(sos.lat, -34.60372, 0.00001);
+  closeTo(sos.lon, -58.38159, 0.00001);
+  assert.equal(sos.accuracy, 12);
+  assert.equal(sos.altitude, 25);
+  assert.equal(sos.clock, '14:07:31');
+});
+
+test('parseSosText rejects invalid or unrelated messages', () => {
+  assert.equal(parseSosText('Mensaje normal'), null);
+  assert.equal(parseSosText('SOS · 95,10'), null);
+  assert.equal(parseSosText('SOS · -34.6,-181'), null);
 });

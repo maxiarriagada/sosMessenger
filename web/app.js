@@ -6,6 +6,7 @@ import {
   formatHeading,
   formatRelative,
   normalizeHeading,
+  parseSosText,
   relativeBearing,
   routeInfo,
 } from './lm_geo.js';
@@ -20,8 +21,63 @@ import {
 } from './lm_packets.js';
 
 const $ = (id) => document.getElementById(id);
+
+function loadSeenSos() {
+  try {
+    const decoded = JSON.parse(localStorage.getItem(SOS_SEEN_KEY) || '[]');
+    return new Set(Array.isArray(decoded) ? decoded.filter((key) => typeof key === 'string') : []);
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function persistSeenSos() {
+  try {
+    localStorage.setItem(SOS_SEEN_KEY, JSON.stringify([...state.seenSosKeys]));
+  } catch (_) {}
+}
+
+function sosMessageKey(message) {
+  return `sos:${message.msgId}:${message.from}:${message.fromBootId}`;
+}
+
+function getSosEntries() {
+  const entries = [];
+  for (const message of chat.messages) {
+    if (message.outgoing) {
+      continue;
+    }
+    const parsed = parseSosText(message.text);
+    if (!parsed) {
+      continue;
+    }
+    entries.push({
+      ...parsed,
+      key: sosMessageKey(message),
+      message,
+      from: message.from || 'peer',
+      sentAt: message.sentAt,
+      text: message.text,
+    });
+  }
+  return entries.sort((a, b) => Date.parse(b.sentAt) - Date.parse(a.sentAt));
+}
+
+function currentSosAlert() {
+  return getSosEntries().find((entry) => !state.seenSosKeys.has(entry.key)) || null;
+}
+
+function markSosSeen(entry) {
+  if (!entry || state.seenSosKeys.has(entry.key)) {
+    return;
+  }
+  state.seenSosKeys.add(entry.key);
+  persistSeenSos();
+  renderTabs();
+}
 const NODE_STALE_MS = 8000;
 const PEER_STALE_MS = 15000;
+const SOS_SEEN_KEY = 'lm_sos_seen_v1';
 const ble = new LmBle();
 const chat = new LmChatStore();
 const isIos =
@@ -67,6 +123,9 @@ const state = {
   unread: 0,
   notifySupported: typeof Notification !== 'undefined',
   flushing: false,
+  seenSosKeys: loadSeenSos(),
+  activeSosEntry: null,
+  scrollChatTop: false,
 };
 
 function init() {
@@ -141,6 +200,13 @@ function bindEvents() {
   });
   $('sendBtn').addEventListener('click', sendText);
   $('sosBtn')?.addEventListener('click', sendSos);
+  $('sosTrackBtn')?.addEventListener('click', trackActiveSos);
+  $('sosModalClose')?.addEventListener('click', () => {
+    $('sosModal')?.close?.();
+  });
+  $('sosModal')?.addEventListener('close', () => {
+    state.activeSosEntry = null;
+  });
   $('clearChatBtn').addEventListener('click', () => {
     if (chat.count === 0) {
       return;
@@ -170,6 +236,10 @@ function onBleState(snapshot) {
 function onIncomingText(event) {
   const message = event.detail;
   const before = chat.count;
+  const sos = parseSosText(message.text);
+  if (sos) {
+    state.scrollChatTop = true;
+  }
   chat.addIncoming(message);
   if (chat.count === before) {
     return;
@@ -179,7 +249,7 @@ function onIncomingText(event) {
     state.unread += 1;
     notifyMessage(message);
   }
-  toast(`Mensaje de ${message.from || 'peer'}`);
+  toast(sos ? `SOS recibido de ${message.from || 'peer'}` : `Mensaje de ${message.from || 'peer'}`);
 }
 
 function onAck(event) {
@@ -225,7 +295,8 @@ function notifyMessage(message) {
   if (!state.notifySupported || Notification.permission !== 'granted') {
     return;
   }
-  const title = `Mensaje de ${message.from || 'peer'}`;
+  const from = message.from || 'peer';
+  const title = parseSosText(message.text) ? `SOS de ${from}` : `Mensaje de ${from}`;
   const options = {
     body: String(message.text ?? '').slice(0, 120),
     tag: `lm-${message.msgId}`,
@@ -740,7 +811,33 @@ function findNavTarget(snapshot) {
   if (!state.navTarget) {
     return null;
   }
+  if (state.navTarget.startsWith('sos:')) {
+    const entry = getSosEntries().find((item) => item.key === state.navTarget);
+    if (!entry) {
+      return null;
+    }
+    const age = Date.parse(entry.sentAt);
+    return {
+      id: entry.key,
+      from: entry.from,
+      isSos: true,
+      hasFix: true,
+      lat: entry.lat,
+      lon: entry.lon,
+      text: entry.text,
+      fixAgeMs: Number.isFinite(age) ? Date.now() - age : null,
+    };
+  }
   return (snapshot.peers || []).find((peer) => peer.id === state.navTarget) || null;
+}
+
+function navOptionLabel(id, peers, origin) {
+  if (id.startsWith('sos:')) {
+    const entry = getSosEntries().find((item) => item.key === id);
+    return entry ? `SOS ${entry.from} · ${formatCoords(entry)}` : 'SOS · sin datos';
+  }
+  const peer = peers.find((item) => item.id === id);
+  return peer ? peerOptionLabel(peer, origin) : `LM-${id} · sin datos`;
 }
 
 function formatCoords(point) {
@@ -811,10 +908,7 @@ function renderNavigation(snapshot) {
     savePreference('lm_nav_target_v1', state.navTarget);
   }
   for (const option of Array.from(select.options)) {
-    const peer = peers.find((item) => item.id === option.value);
-    option.textContent = peer
-      ? peerOptionLabel(peer, state.lastFix)
-      : `LM-${option.value} · sin datos`;
+    option.textContent = navOptionLabel(option.value, peers, state.lastFix);
   }
   select.value = state.navTarget || '';
   select.disabled = ids.length === 0;
@@ -842,9 +936,11 @@ function renderNavigation(snapshot) {
   }
 
   empty.hidden = true;
-  const label = `LM-${target.id}`;
+  const label = target.isSos ? `SOS ${target.from}` : `LM-${target.id}`;
   $('navHint').textContent = targetPosition
-    ? `${label} · ${sourceName(target.gpsSource)}`
+    ? target.isSos
+      ? `${label} · ${formatCoords(targetPosition)}`
+      : `${label} · ${sourceName(target.gpsSource)}`
     : `${label} · sin fix`;
   if (!targetPosition) {
     setBadge($('navBadge'), 'SIN FIX', 'warn');
@@ -854,9 +950,9 @@ function renderNavigation(snapshot) {
     setBadge($('navBadge'), 'LISTO', 'ok');
   }
   info.append(
-    navRoute('Tu celular → objetivo', state.lastFix, targetPosition, state.heading, true),
+    navRoute(`Tu celular → ${label}`, state.lastFix, targetPosition, state.heading, true),
     navRoute(
-      node ? `Nodo ${node.nodeId || 'LM'} → objetivo` : 'Nodo → objetivo',
+      node ? `Nodo ${node.nodeId || 'LM'} → ${label}` : `Nodo → ${label}`,
       nodePosition,
       targetPosition,
       null,
@@ -907,6 +1003,18 @@ function renderMap(snapshot) {
       label: peerOptionLabel(peer, state.lastFix),
     });
   };
+  const addSosPoint = (sos) => {
+    if (!sos?.isSos || !Number.isFinite(sos.lat) || !Number.isFinite(sos.lon)) {
+      return;
+    }
+    addPoint({
+      id: sos.id,
+      kind: 'sos',
+      lat: sos.lat,
+      lon: sos.lon,
+      label: `SOS ${sos.from} · ${formatCoords(sos)}`,
+    });
+  };
 
   if (state.lastFix) {
     addPoint({
@@ -931,7 +1039,11 @@ function renderMap(snapshot) {
       label: `Nodo ${status.nodeId || 'LM'} · ${sourceName(status.gpsSource)}`,
     });
   }
-  addPeerPoint(target);
+  if (target?.isSos) {
+    addSosPoint(target);
+  } else {
+    addPeerPoint(target);
+  }
   if (state.showAllNodes) {
     for (const peer of snapshot.peers || []) {
       addPeerPoint(peer);
@@ -966,7 +1078,7 @@ function renderMap(snapshot) {
   const targetPosition =
     target?.hasFix && Number.isFinite(target.lat) && Number.isFinite(target.lon) ? target : null;
   if (targetPosition) {
-    hintParts.push(`objetivo LM-${target.id}`);
+    hintParts.push(target.isSos ? `objetivo SOS ${target.from}` : `objetivo LM-${target.id}`);
   }
   if (state.showAllNodes) {
     hintParts.push('todos los nodos');
@@ -1021,7 +1133,7 @@ function renderMap(snapshot) {
     if (!state.navLine) {
       state.navLine = L.polyline(latlngs, {
         className: 'nav-line',
-        color: '#5aa9ff',
+        color: target?.isSos ? '#ff6b6b' : '#5aa9ff',
         weight: 3,
         opacity: 0.9,
         dashArray: '7 7',
@@ -1145,10 +1257,13 @@ function renderTabs() {
   $('monitorTab').classList.toggle('active', state.tab === 'monitor');
   $('mapTab')?.classList.toggle('active', state.tab === 'map');
   $('chatTab').classList.toggle('active', state.tab === 'chat');
+  const sosAlert = currentSosAlert();
+  $('chatTab')?.classList.toggle('nav-btn-chat-alert', Boolean(sosAlert));
   const badge = $('chatBadge');
   if (badge) {
     badge.hidden = state.unread === 0;
     badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+    badge.classList.toggle('nav-badge-danger', Boolean(sosAlert));
   }
 }
 
@@ -1166,9 +1281,32 @@ function renderMessages() {
     list.append(empty);
     return;
   }
-  for (const message of chat.messages) {
+  const sosEntries = getSosEntries();
+  const sosByKey = new Map(sosEntries.map((entry) => [entry.key, entry]));
+  const ordered = [
+    ...sosEntries.map((entry) => entry.message),
+    ...chat.messages.filter((message) => !sosByKey.has(sosMessageKey(message))),
+  ];
+  for (const message of ordered) {
+    const sos = sosByKey.get(sosMessageKey(message));
     const item = document.createElement('div');
     item.className = `msg ${message.outgoing ? 'msg-outgoing' : 'msg-incoming'}`;
+    if (sos) {
+      item.classList.add('msg-sos');
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      const open = () => {
+        markSosSeen(sos);
+        openSosModal(sos);
+      };
+      item.addEventListener('click', open);
+      item.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          open();
+        }
+      });
+    }
     const meta = document.createElement('div');
     meta.className = 'msg-meta';
     const who = document.createElement('span');
@@ -1181,7 +1319,14 @@ function renderMessages() {
     const text = document.createElement('div');
     text.className = 'msg-text';
     text.textContent = message.text;
-    item.append(meta, text);
+    if (sos) {
+      const pin = document.createElement('div');
+      pin.className = 'msg-pin';
+      pin.textContent = 'SOS · tocá para ver opciones';
+      item.append(meta, pin, text);
+    } else {
+      item.append(meta, text);
+    }
     if (message.outgoing) {
       const status = document.createElement('div');
       status.className = 'msg-status';
@@ -1201,7 +1346,12 @@ function renderMessages() {
     }
     list.append(item);
   }
-  if (shouldScroll) {
+  if (state.scrollChatTop) {
+    requestAnimationFrame(() => {
+      list.scrollTop = 0;
+      state.scrollChatTop = false;
+    });
+  } else if (shouldScroll) {
     requestAnimationFrame(() => {
       list.lastElementChild?.scrollIntoView({ block: 'end', behavior: 'smooth' });
     });
@@ -1586,6 +1736,52 @@ async function sendSos() {
   }
 }
 
+function openSosModal(entry) {
+  const modal = $('sosModal');
+  if (!modal || !entry) {
+    return;
+  }
+  state.activeSosEntry = entry;
+  $('sosModalMeta').textContent = `De ${entry.from} · ${formatTime(entry.sentAt)}`;
+  $('sosModalText').textContent = entry.text;
+  const parts = [formatCoords(entry)];
+  if (Number.isFinite(entry.accuracy)) {
+    parts.push(`±${Math.round(entry.accuracy)} m`);
+  }
+  if (Number.isFinite(entry.altitude)) {
+    parts.push(`alt ${Math.round(entry.altitude)} m`);
+  }
+  $('sosModalCoords').textContent = parts.join(' · ');
+  if (typeof modal.showModal === 'function') {
+    modal.showModal();
+  } else {
+    modal.setAttribute('open', '');
+  }
+}
+
+function trackActiveSos() {
+  const entry = state.activeSosEntry;
+  if (!entry) {
+    return;
+  }
+  state.navTarget = entry.key;
+  state.navSignature = '';
+  savePreference('lm_nav_target_v1', state.navTarget);
+  const modal = $('sosModal');
+  if (modal?.open) {
+    modal.close();
+  }
+  setTab('map', true);
+  render();
+  requestAnimationFrame(() => {
+    const snapshot = ble.snapshot();
+    renderNavigation(snapshot);
+    renderMap(snapshot);
+    centerMap(true);
+    $('mapCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
 async function installApp() {
   const prompt = state.installPrompt;
   if (!prompt) {
@@ -1604,7 +1800,7 @@ function registerServiceWorker() {
     return;
   }
   navigator.serviceWorker
-    .register('./service-worker.js?v=6', { updateViaCache: 'none' })
+    .register('./service-worker.js?v=7', { updateViaCache: 'none' })
     .catch(() => {});
 }
 
