@@ -151,7 +151,7 @@
             <label class="switch-row">
               <span>
                 <strong>Broadcast a todos</strong>
-                <small>El mensaje se retransmite por el hub</small>
+                <small>El mensaje se envía a todos los nodos</small>
               </span>
               <input id="broadcastToggle" type="checkbox" checked>
             </label>
@@ -159,7 +159,7 @@
               <span>Destino</span>
               <select id="targetSelect"></select>
             </label>
-            <p id="targetHint" class="muted small" hidden>Sin peers en el snapshot del hub.</p>
+            <p id="targetHint" class="muted small" hidden>Sin peers en la red.</p>
             <label class="field">
               <span>Mensaje</span>
               <textarea id="messageInput" rows="2" maxlength="360" placeholder="Escribe un mensaje..."></textarea>

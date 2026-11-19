@@ -371,7 +371,7 @@ function renderPeers(snapshot) {
   $('peersBadge').textContent = String(peers.length);
   $('peersUpdated').textContent = snapshot.connected
     ? snapshot.hubUptimeS
-      ? `Hub ${formatUptime(snapshot.hubUptimeS)}`
+      ? `Red ${formatUptime(snapshot.hubUptimeS)}`
       : 'Sin snapshot'
     : 'Sin conexión';
   const list = $('peersList');
@@ -380,7 +380,7 @@ function renderPeers(snapshot) {
     const empty = document.createElement('p');
     empty.className = 'muted small';
     empty.textContent = snapshot.connected
-      ? 'Sin peers en el snapshot del hub.'
+      ? 'Sin peers en la red.'
       : 'Conectá el nodo para ver peers.';
     list.append(empty);
     return;
