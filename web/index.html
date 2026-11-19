@@ -56,6 +56,13 @@
           <button id="installBtn" class="btn btn-small" type="button">Instalar</button>
         </section>
 
+        <section id="staleBanner" class="banner banner-warning" hidden>
+          <div>
+            <strong>Datos del nodo desactualizados</strong>
+            <p id="staleText">El nodo dejó de enviar estado recientemente.</p>
+          </div>
+        </section>
+
         <section id="monitorView" class="view">
           <article class="card" id="connectionCard">
             <div class="card-head">
@@ -146,7 +153,10 @@
                 <h2>Mensajes</h2>
                 <p class="muted" id="chatMeta">0 mensajes</p>
               </div>
-              <button id="clearChatBtn" class="icon-btn" type="button" disabled>Borrar historial</button>
+              <div class="header-actions">
+                <button id="notifyBtn" class="icon-btn" type="button" hidden>Activar avisos</button>
+                <button id="clearChatBtn" class="icon-btn" type="button" disabled>Borrar historial</button>
+              </div>
             </div>
             <label class="switch-row">
               <span>
@@ -168,6 +178,7 @@
               <span id="byteCounter" class="muted small">0 / 180 bytes</span>
               <button id="sendBtn" class="btn btn-primary" type="button" disabled>Enviar</button>
             </div>
+            <p id="queueHint" class="muted small" hidden>Sin BLE: el mensaje se guarda y se envía al reconectar el nodo original.</p>
           </article>
           <div id="chatList" class="chat-list"></div>
         </section>

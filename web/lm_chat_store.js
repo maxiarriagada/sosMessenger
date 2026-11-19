@@ -2,6 +2,7 @@ export const LM_CHAT_STORAGE_KEY = 'lm_chat_v1';
 export const LM_CHAT_MAX_MESSAGES = 200;
 
 export const LM_CHAT_STATUS = Object.freeze({
+  pending: 'pending',
   sent: 'sent',
   delivered: 'delivered',
   failed: 'failed',
@@ -46,6 +47,7 @@ function parseMessage(value) {
     broadcast: value.broadcast === true,
     outgoing: value.outgoing === true,
     status,
+    deliveredAt: value.deliveredAt ? String(value.deliveredAt) : null,
   };
 }
 
@@ -58,6 +60,12 @@ export class LmChatStore extends EventTarget {
 
   get count() {
     return this.messages.length;
+  }
+
+  get pendingMessages() {
+    return this.messages.filter(
+      (message) => message.outgoing && message.status === LM_CHAT_STATUS.pending,
+    );
   }
 
   load() {
@@ -82,7 +90,7 @@ export class LmChatStore extends EventTarget {
     }
   }
 
-  addOutgoing(packet) {
+  addOutgoing(packet, status = LM_CHAT_STATUS.sent) {
     this.messages.push({
       msgId: Number(packet.msgId) >>> 0,
       from: String(packet.from ?? ''),
@@ -92,7 +100,10 @@ export class LmChatStore extends EventTarget {
       text: String(packet.text ?? ''),
       broadcast: packet.broadcast === true,
       outgoing: true,
-      status: LM_CHAT_STATUS.sent,
+      status: Object.values(LM_CHAT_STATUS).includes(status)
+        ? status
+        : LM_CHAT_STATUS.sent,
+      deliveredAt: null,
     });
     this.trim();
     this.emitChange();
@@ -120,16 +131,43 @@ export class LmChatStore extends EventTarget {
       broadcast: packet.broadcast === true,
       outgoing: false,
       status: LM_CHAT_STATUS.delivered,
+      deliveredAt: new Date().toISOString(),
     });
     this.trim();
     this.emitChange();
     this.persist();
   }
 
+  setStatus(msgId, status) {
+    const id = Number(msgId) >>> 0;
+    const index = this.messages.findIndex(
+      (message) => message.outgoing && message.msgId === id,
+    );
+    if (index < 0 || !Object.values(LM_CHAT_STATUS).includes(status)) {
+      return;
+    }
+    if (
+      this.messages[index].status === status ||
+      (this.messages[index].status === LM_CHAT_STATUS.delivered &&
+        status === LM_CHAT_STATUS.sent)
+    ) {
+      return;
+    }
+    this.messages[index] = { ...this.messages[index], status };
+    this.emitChange();
+    this.persist();
+  }
+
   applyAck(ack) {
     const msgId = Number(ack.msgId) >>> 0;
+    const ackTo = String(ack.to ?? '');
+    const ackFrom = String(ack.from ?? '');
     const index = this.messages.findIndex(
-      (message) => message.outgoing && message.msgId === msgId,
+      (message) =>
+        message.outgoing &&
+        message.msgId === msgId &&
+        (!ackTo || ackTo === message.from) &&
+        (!ackFrom || ackFrom === message.to),
     );
     if (index < 0) {
       return;
@@ -138,7 +176,11 @@ export class LmChatStore extends EventTarget {
     if (this.messages[index].status === status) {
       return;
     }
-    this.messages[index] = { ...this.messages[index], status };
+    this.messages[index] = {
+      ...this.messages[index],
+      status,
+      deliveredAt: status === LM_CHAT_STATUS.delivered ? new Date().toISOString() : null,
+    };
     this.emitChange();
     this.persist();
   }

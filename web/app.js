@@ -19,6 +19,8 @@ import {
 } from './lm_packets.js';
 
 const $ = (id) => document.getElementById(id);
+const NODE_STALE_MS = 8000;
+const PEER_STALE_MS = 15000;
 const ble = new LmBle();
 const chat = new LmChatStore();
 const isIos =
@@ -52,21 +54,30 @@ const state = {
   mapMarkers: new Map(),
   mapPoints: [],
   mapHasCentered: false,
+  nodeIdentity: null,
+  unread: 0,
+  notifySupported: typeof Notification !== 'undefined',
+  flushing: false,
 };
 
 function init() {
   chat.addEventListener('change', onChatChange);
   chat.load();
   bindEvents();
-  ble.addEventListener('state', render);
+  ble.addEventListener('state', onBleState);
   ble.addEventListener('text', onIncomingText);
   ble.addEventListener('ack', onAck);
   window.addEventListener('beforeinstallprompt', onInstallPrompt);
   window.addEventListener('appinstalled', onInstalled);
+  window.addEventListener('hashchange', onHashChange);
   registerServiceWorker();
   loadGrantedDevices();
   render();
   renderMessages();
+  if (location.hash === '#chat') {
+    setTab('chat');
+  }
+  setInterval(renderFreshness, 1000);
 }
 
 function bindEvents() {
@@ -106,14 +117,35 @@ function bindEvents() {
       chat.clear();
     }
   });
-  $('monitorTab').addEventListener('click', () => setTab('monitor'));
-  $('chatTab').addEventListener('click', () => setTab('chat'));
+  $('monitorTab').addEventListener('click', () => setTab('monitor', true));
+  $('chatTab').addEventListener('click', () => setTab('chat', true));
   $('installBtn').addEventListener('click', installApp);
+  $('notifyBtn').addEventListener('click', requestNotifications);
+}
+
+function onBleState(snapshot) {
+  if (snapshot.status) {
+    state.nodeIdentity = {
+      id: snapshot.status.nodeId,
+      bootId: snapshot.status.bootId,
+    };
+  }
+  render();
+  flushPending();
 }
 
 function onIncomingText(event) {
   const message = event.detail;
+  const before = chat.count;
   chat.addIncoming(message);
+  if (chat.count === before) {
+    return;
+  }
+  const viewingChat = state.tab === 'chat' && !document.hidden;
+  if (!viewingChat) {
+    state.unread += 1;
+    notifyMessage(message);
+  }
   toast(`Mensaje de ${message.from || 'peer'}`);
 }
 
@@ -125,6 +157,85 @@ function onChatChange() {
   renderChatMeta();
   renderMessages();
   renderTabs();
+}
+
+function onHashChange() {
+  setTab(location.hash === '#chat' ? 'chat' : 'monitor');
+}
+
+async function requestNotifications() {
+  if (!state.notifySupported) {
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    renderSupport(ble.snapshot());
+    toast(
+      permission === 'granted'
+        ? 'Avisos activados'
+        : permission === 'denied'
+          ? 'Avisos bloqueados en el navegador'
+          : 'Avisos no activados',
+    );
+  } catch (_) {
+    toast('No se pudieron activar los avisos');
+  }
+}
+
+function notifyMessage(message) {
+  if (!state.notifySupported || Notification.permission !== 'granted') {
+    return;
+  }
+  const title = `Mensaje de ${message.from || 'peer'}`;
+  const options = {
+    body: String(message.text ?? '').slice(0, 120),
+    tag: `lm-${message.msgId}`,
+    icon: './icons/icon-192.png',
+    data: { url: './#chat' },
+  };
+  try {
+    if (navigator.serviceWorker?.ready) {
+      navigator.serviceWorker.ready
+        .then((registration) => registration.showNotification(title, options))
+        .catch(() => new Notification(title, options));
+    } else {
+      new Notification(title, options);
+    }
+  } catch (_) {}
+}
+
+async function flushPending() {
+  if (state.flushing || !ble.connected || !ble.status) {
+    return;
+  }
+  const pending = chat.pendingMessages;
+  if (pending.length === 0) {
+    return;
+  }
+  state.flushing = true;
+  try {
+    for (const message of pending) {
+      if (!ble.connected || !ble.status) {
+        break;
+      }
+      if (
+        message.from !== ble.status.nodeId ||
+        message.fromBootId !== ble.status.bootId
+      ) {
+        continue;
+      }
+      const sent = await ble.sendText(encodeTextPacket(packetFromMessage(message)));
+      if (!sent) {
+        break;
+      }
+      chat.setStatus(message.msgId, LM_CHAT_STATUS.sent);
+    }
+    if (chat.pendingMessages.length === 0) {
+      toast('Mensajes pendientes enviados');
+    }
+  } finally {
+    state.flushing = false;
+  }
 }
 
 function onInstallPrompt(event) {
@@ -151,6 +262,7 @@ function render() {
   renderNode(snapshot);
   renderGps();
   renderPeers(snapshot);
+  renderStaleBanner(snapshot);
   renderMap(snapshot);
   renderEvent(snapshot);
   renderChatMeta();
@@ -185,6 +297,16 @@ function renderSupport(snapshot) {
   $('supportBanner').hidden = snapshot.supported || isIos;
   $('iosBanner').hidden = !(isIos && !snapshot.supported);
   $('installBanner').hidden = !state.installPrompt || isStandalone();
+  const notifyBtn = $('notifyBtn');
+  notifyBtn.hidden = !state.notifySupported;
+  const permission = state.notifySupported ? Notification.permission : 'denied';
+  notifyBtn.disabled = permission === 'granted' || permission === 'denied';
+  notifyBtn.textContent =
+    permission === 'granted'
+      ? 'Avisos activos'
+      : permission === 'denied'
+        ? 'Avisos bloqueados'
+        : 'Activar avisos';
 }
 
 function renderConnection(snapshot) {
@@ -235,6 +357,35 @@ function renderConnection(snapshot) {
   }
 }
 
+function freshness(snapshot) {
+  const nodeAge = snapshot.lastStatusAt ? Date.now() - snapshot.lastStatusAt : Infinity;
+  const peersAge = snapshot.lastPeersAt ? Date.now() - snapshot.lastPeersAt : Infinity;
+  return {
+    nodeAge,
+    peersAge,
+    nodeStale: Boolean(snapshot.lastStatusAt) && snapshot.connected && nodeAge > NODE_STALE_MS,
+    peersStale: Boolean(snapshot.lastPeersAt) && snapshot.connected && peersAge > PEER_STALE_MS,
+  };
+}
+
+function renderStaleBanner(snapshot) {
+  const info = freshness(snapshot);
+  const stale = info.nodeStale || info.peersStale;
+  $('staleBanner').hidden = !stale;
+  if (stale) {
+    $('staleText').textContent = info.nodeStale
+      ? `Sin estado del nodo hace ${formatAge(info.nodeAge)}. Puede estar ocupado o fuera de alcance.`
+      : `Sin snapshot de peers hace ${formatAge(info.peersAge)}. Las posiciones pueden estar desactualizadas.`;
+  }
+}
+
+function renderFreshness() {
+  const snapshot = ble.snapshot();
+  renderNode(snapshot);
+  renderPeers(snapshot);
+  renderStaleBanner(snapshot);
+}
+
 function renderNode(snapshot) {
   const card = $('nodeCard');
   card.hidden = !snapshot.connected;
@@ -242,13 +393,16 @@ function renderNode(snapshot) {
     return;
   }
   const status = snapshot.status;
-  $('nodeUpdated').textContent = snapshot.lastStatusAt
-    ? `Actualizado ${formatClock(snapshot.lastStatusAt)}`
-    : 'Esperando status...';
+  const fresh = freshness(snapshot);
+  $('nodeUpdated').textContent = !snapshot.lastStatusAt
+    ? 'Esperando status...'
+    : fresh.nodeStale
+      ? `Sin estado reciente (${formatAge(fresh.nodeAge)})`
+      : `Actualizado ${formatClock(snapshot.lastStatusAt)}`;
   setBadge(
     $('fixBadge'),
-    status?.hasFix ? 'FIX' : 'SIN FIX',
-    status?.hasFix ? 'ok' : status ? 'error' : 'muted',
+    fresh.nodeStale ? 'SIN DATOS' : status?.hasFix ? 'FIX' : 'SIN FIX',
+    fresh.nodeStale ? 'warn' : status?.hasFix ? 'ok' : status ? 'error' : 'muted',
   );
   const info = $('nodeInfo');
   clear(info);
@@ -368,12 +522,15 @@ function renderGps() {
 
 function renderPeers(snapshot) {
   const peers = snapshot.peers || [];
-  $('peersBadge').textContent = String(peers.length);
-  $('peersUpdated').textContent = snapshot.connected
-    ? snapshot.hubUptimeS
-      ? `Red ${formatUptime(snapshot.hubUptimeS)}`
-      : 'Sin snapshot'
-    : 'Sin conexión';
+  const info = freshness(snapshot);
+  setBadge($('peersBadge'), String(peers.length), info.peersStale ? 'warn' : 'muted');
+  $('peersUpdated').textContent = !snapshot.connected
+    ? 'Sin conexión'
+    : info.peersStale
+      ? `Sin snapshot reciente (${formatAge(info.peersAge)})`
+      : snapshot.hubUptimeS
+        ? `Red ${formatUptime(snapshot.hubUptimeS)}`
+        : 'Sin snapshot';
   const list = $('peersList');
   clear(list);
   if (peers.length === 0) {
@@ -614,22 +771,26 @@ function renderChatMeta() {
   const over = bytes > 180;
   $('byteCounter').textContent = `${bytes} / 180 bytes`;
   $('byteCounter').classList.toggle('error', over);
+  $('queueHint').hidden = ble.connected;
   $('sendBtn').disabled =
-    !ble.connected ||
-    !ble.status ||
+    !state.nodeIdentity ||
     state.sending ||
     bytes === 0 ||
     over ||
     (!state.broadcast && !state.target);
-  $('sendBtn').textContent = state.sending ? 'Enviando...' : 'Enviar';
+  $('sendBtn').textContent = state.sending
+    ? 'Enviando...'
+    : ble.connected
+      ? 'Enviar'
+      : 'Encolar';
 }
 
 function renderTabs() {
   $('monitorTab').classList.toggle('active', state.tab === 'monitor');
   $('chatTab').classList.toggle('active', state.tab === 'chat');
   const badge = $('chatBadge');
-  badge.hidden = chat.count === 0;
-  badge.textContent = chat.count > 99 ? '99+' : String(chat.count);
+  badge.hidden = state.unread === 0;
+  badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
 }
 
 function renderMessages() {
@@ -642,7 +803,7 @@ function renderMessages() {
     empty.className = 'empty-state';
     empty.textContent = ble.connected
       ? 'Todavía no hay mensajes.\nEscribe el primero en el compositor.'
-      : 'Conectá el nodo LM para enviar mensajes.';
+      : 'Podés escribir ahora: el mensaje se guarda y se envía al reconectar el nodo original.';
     list.append(empty);
     return;
   }
@@ -671,6 +832,9 @@ function renderMessages() {
       } else if (message.status === LM_CHAT_STATUS.failed) {
         status.classList.add('failed');
         status.textContent = 'Falló';
+      } else if (message.status === LM_CHAT_STATUS.pending) {
+        status.classList.add('pending');
+        status.textContent = `Pendiente · nodo ${message.from || 'LM'}`;
       } else {
         status.textContent = message.broadcast ? 'Enviado (broadcast)' : 'Enviado';
       }
@@ -685,8 +849,14 @@ function renderMessages() {
   }
 }
 
-function setTab(tab) {
+function setTab(tab, updateHash = false) {
   state.tab = tab;
+  if (tab === 'chat') {
+    state.unread = 0;
+  }
+  if (updateHash && location.hash !== `#${tab}`) {
+    history.replaceState(null, '', `#${tab}`);
+  }
   $('monitorView').hidden = tab !== 'monitor';
   $('chatView').hidden = tab !== 'chat';
   renderTabs();
@@ -880,7 +1050,7 @@ function onGeoError(error) {
 }
 
 async function sendText() {
-  if (state.sending) {
+  if (state.sending || state.flushing) {
     return;
   }
   const input = $('messageInput');
@@ -893,43 +1063,54 @@ async function sendText() {
     toast('El mensaje supera 180 bytes UTF-8');
     return;
   }
-  if (!ble.connected) {
-    toast('Conectá el nodo LM para enviar');
+  const identity = ble.status
+    ? { id: ble.status.nodeId, bootId: ble.status.bootId }
+    : state.nodeIdentity;
+  if (!identity) {
+    toast('Conectá una vez al nodo para poder enviar');
     return;
   }
-  if (!ble.status) {
-    toast('Esperando estado del nodo...');
-    return;
-  }
-  const peers = ble.peers.map((peer) => peer.id);
   const target = state.broadcast ? '*' : state.target;
-  if (!state.broadcast && (!target || !peers.includes(target))) {
+  if (!state.broadcast && !target) {
     toast('No hay peers para enviar 1:1');
+    return;
+  }
+  if (
+    !state.broadcast &&
+    ble.connected &&
+    !ble.peers.some((peer) => peer.id === target)
+  ) {
+    toast('El peer ya no está en la red');
     return;
   }
   const packet = {
     msgId: randomMsgId(),
     sentAt: nowSeconds(),
-    from: ble.status.nodeId,
+    from: identity.id,
     to: target,
-    fromBootId: ble.status.bootId,
+    fromBootId: identity.bootId,
     ttl: 0,
     flags: state.broadcast ? LM_TEXT_FLAG_BROADCAST : 0,
     text,
     broadcast: state.broadcast,
   };
+  chat.addOutgoing(packet, LM_CHAT_STATUS.pending);
+  input.value = '';
+  state.draft = '';
+  if (!ble.connected || !ble.status) {
+    toast('Mensaje guardado; se enviará al reconectar el nodo original');
+    return;
+  }
   state.sending = true;
   renderChatMeta();
   try {
     const sent = await ble.sendText(encodeTextPacket(packet));
-    if (!sent) {
-      toast(ble.error || 'No se pudo enviar el mensaje');
-      return;
+    if (sent) {
+      chat.setStatus(packet.msgId, LM_CHAT_STATUS.sent);
+      toast(state.broadcast ? 'Broadcast enviado' : `Enviado a ${target}`);
+    } else {
+      toast('Mensaje guardado para reintentar');
     }
-    chat.addOutgoing(packet);
-    input.value = '';
-    state.draft = '';
-    toast(state.broadcast ? 'Broadcast enviado' : `Enviado a ${target}`);
   } finally {
     state.sending = false;
     renderChatMeta();
@@ -1015,6 +1196,32 @@ function formatUptime(seconds) {
     return `${minutes}m ${rest}s`;
   }
   return `${rest}s`;
+}
+
+function packetFromMessage(message) {
+  const timestamp = new Date(message.sentAt).getTime();
+  return {
+    msgId: message.msgId,
+    sentAt: Math.floor(timestamp / 1000) || nowSeconds(),
+    from: message.from,
+    to: message.to,
+    fromBootId: message.fromBootId,
+    ttl: 0,
+    flags: message.broadcast ? LM_TEXT_FLAG_BROADCAST : 0,
+    text: message.text,
+    broadcast: message.broadcast,
+  };
+}
+
+function formatAge(ms) {
+  if (!Number.isFinite(ms)) {
+    return '—';
+  }
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds >= 60) {
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+  return `${seconds}s`;
 }
 
 function formatMs(value) {

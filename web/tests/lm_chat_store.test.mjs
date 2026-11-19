@@ -98,3 +98,33 @@ test('invalid stored data is ignored', () => {
   store.load();
   assert.equal(store.count, 0);
 });
+
+test('pending messages are listed and can be marked as sent', () => {
+  const store = new LmChatStore(new MemoryStorage());
+  store.addOutgoing(packet({ msgId: 21 }), LM_CHAT_STATUS.pending);
+  assert.equal(store.pendingMessages.length, 1);
+  store.setStatus(21, LM_CHAT_STATUS.sent);
+  assert.equal(store.pendingMessages.length, 0);
+  assert.equal(store.messages[0].status, LM_CHAT_STATUS.sent);
+});
+
+test('setStatus does not downgrade a delivered message', () => {
+  const store = new LmChatStore(new MemoryStorage());
+  store.addOutgoing(packet({ msgId: 22, to: 'A608', broadcast: false }));
+  store.applyAck({ msgId: 22, to: '5494', from: 'A608', isError: false });
+  store.setStatus(22, LM_CHAT_STATUS.sent);
+  assert.equal(store.messages[0].status, LM_CHAT_STATUS.delivered);
+  assert.ok(store.messages[0].deliveredAt);
+});
+
+test('ACK from another peer is ignored', () => {
+  const store = new LmChatStore(new MemoryStorage());
+  store.addOutgoing(packet({ msgId: 23, to: 'A608' }));
+  store.applyAck({ msgId: 23, to: '5494', from: 'FFFF', isError: false });
+  assert.equal(store.messages[0].status, LM_CHAT_STATUS.sent);
+  store.applyAck({ msgId: 23, to: '5494', from: 'FFFF', isError: true });
+  store.applyAck({ msgId: 23, to: 'FFFF', from: 'A608', isError: false });
+  assert.equal(store.messages[0].status, LM_CHAT_STATUS.sent);
+  store.applyAck({ msgId: 23, to: '5494', from: 'A608', isError: false });
+  assert.equal(store.messages[0].status, LM_CHAT_STATUS.delivered);
+});

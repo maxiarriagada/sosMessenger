@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lora-messenger-web-v2';
+const CACHE_NAME = 'lora-messenger-web-v3';
 
 const APP_SHELL = [
   './',
@@ -71,6 +71,22 @@ self.addEventListener('fetch', (event) => {
           return caches.match('./index.html');
         }
         return Response.error();
+      }),
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || './#chat', self.location.href).href;
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((windows) => {
+        const existing = windows.find((window) => window.url === target);
+        if (existing) {
+          return existing.focus();
+        }
+        return self.clients.openWindow(target);
       }),
   );
 });

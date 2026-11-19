@@ -96,6 +96,8 @@ export class LmBle extends EventTarget {
     this.peers = [];
     this.hubUptimeS = 0;
     this.lastStatusAt = null;
+    this.lastPeersAt = null;
+    this.lastPeersAt = null;
     this.lastEvent = null;
     this.error = null;
     this.connected = false;
@@ -151,6 +153,7 @@ export class LmBle extends EventTarget {
       peers: this.peers,
       hubUptimeS: this.hubUptimeS,
       lastStatusAt: this.lastStatusAt,
+      lastPeersAt: this.lastPeersAt,
       lastEvent: this.lastEvent,
       error: this.error,
       textReady: this.textReady,
@@ -346,6 +349,7 @@ export class LmBle extends EventTarget {
     }
     this.peers = parsed.peers;
     this.hubUptimeS = parsed.hubUptimeS;
+    this.lastPeersAt = Date.now();
     this.emitState();
   }
 
@@ -375,6 +379,7 @@ export class LmBle extends EventTarget {
     this.peers = [];
     this.hubUptimeS = 0;
     this.lastStatusAt = null;
+    this.lastPeersAt = null;
     if (this.manualDisconnect) {
       this.lastEvent = 'Desconectado';
       this.error = null;
@@ -429,6 +434,7 @@ export class LmBle extends EventTarget {
     this.peers = [];
     this.hubUptimeS = 0;
     this.lastStatusAt = null;
+    this.lastPeersAt = null;
     this.error = null;
     this.lastEvent = 'Desconectado';
     if (this.device?.gatt?.connected) {
