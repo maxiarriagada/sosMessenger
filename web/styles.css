@@ -279,6 +279,15 @@ button {
   color: var(--danger);
 }
 
+.btn-sos {
+  min-height: 40px;
+  border-color: rgba(255, 107, 107, 0.65);
+  background: linear-gradient(135deg, #ff6b6b, #d64545);
+  color: #fff;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
 .btn-small {
   min-height: 36px;
   padding: 0 12px;
@@ -690,6 +699,11 @@ button {
   transform: translateX(20px);
 }
 
+.switch-row input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -821,7 +835,7 @@ button {
   left: 50%;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   width: min(100%, 960px);
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
@@ -918,9 +932,13 @@ button {
   }
 
   #connectionCard,
-  #nodeCard,
-  #mapCard {
+  #nodeCard {
     grid-column: span 2;
+  }
+
+  #mapView {
+    grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
+    align-items: start;
   }
 }
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lora-messenger-web-v3';
+const CACHE_NAME = 'lora-messenger-web-v5';
 
 const APP_SHELL = [
   './',

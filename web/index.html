@@ -106,12 +106,41 @@
               <button id="gpsBtn" class="btn btn-primary" type="button">Iniciar GPS</button>
               <button id="compassBtn" class="btn" type="button">Activar brújula</button>
             </div>
+            <label class="switch-row">
+              <span>
+                <strong>Mantener pantalla encendida</strong>
+                <small id="wakeLockStatus">La pantalla puede apagarse normalmente.</small>
+              </span>
+              <input id="wakeLockToggle" type="checkbox">
+            </label>
             <div class="info-grid" id="gpsInfo"></div>
             <p id="gpsError" class="error-text" hidden></p>
             <p class="muted small" id="gpsNote" hidden>El GPS está activo, pero no hay nodo BLE conectado.</p>
             <p class="muted small">En segundo plano el navegador puede suspender la ubicación.</p>
           </article>
 
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h2>Peers vía LoRa</h2>
+                <p class="muted" id="peersUpdated">Sin snapshot</p>
+              </div>
+              <span id="peersBadge" class="badge badge-muted">0</span>
+            </div>
+            <div id="peersList" class="stack"></div>
+          </article>
+
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h2>Evento</h2>
+                <p class="muted" id="eventText">Listo</p>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section id="mapView" class="view" hidden>
           <article class="card" id="mapCard">
             <div class="card-head">
               <div>
@@ -153,26 +182,6 @@
             </div>
             <p id="navEmpty" class="muted small" hidden></p>
           </article>
-
-          <article class="card">
-            <div class="card-head">
-              <div>
-                <h2>Peers vía LoRa</h2>
-                <p class="muted" id="peersUpdated">Sin snapshot</p>
-              </div>
-              <span id="peersBadge" class="badge badge-muted">0</span>
-            </div>
-            <div id="peersList" class="stack"></div>
-          </article>
-
-          <article class="card">
-            <div class="card-head">
-              <div>
-                <h2>Evento</h2>
-                <p class="muted" id="eventText">Listo</p>
-              </div>
-            </div>
-          </article>
         </section>
 
         <section id="chatView" class="view" hidden>
@@ -183,6 +192,7 @@
                 <p class="muted" id="chatMeta">0 mensajes</p>
               </div>
               <div class="header-actions">
+                <button id="sosBtn" class="btn btn-sos" type="button">SOS</button>
                 <button id="notifyBtn" class="icon-btn" type="button" hidden>Activar avisos</button>
                 <button id="clearChatBtn" class="icon-btn" type="button" disabled>Borrar historial</button>
               </div>
@@ -221,13 +231,20 @@
             <rect x="3" y="13" width="8" height="8" rx="2"></rect>
             <rect x="13" y="13" width="8" height="8" rx="2"></rect>
           </svg>
-          <span>Monitor</span>
+          <span>Config</span>
+        </button>
+        <button id="mapTab" class="nav-btn" type="button" data-tab="map">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 3 3 5.5v15L9 18l6 2.5 6-2.5v-15L15 5.5 9 3z"></path>
+            <path d="M9 3v15M15 5.5v15"></path>
+          </svg>
+          <span>Mapa</span>
         </button>
         <button id="chatTab" class="nav-btn" type="button" data-tab="chat">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"></path>
           </svg>
-          <span>Mensajes</span>
+          <span>Messenger</span>
           <span id="chatBadge" class="nav-badge" hidden>0</span>
         </button>
       </nav>

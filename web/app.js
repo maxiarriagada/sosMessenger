@@ -44,6 +44,7 @@ const state = {
   target: null,
   peerSignature: '',
   sending: false,
+  sosSending: false,
   installPrompt: null,
   toastTimer: null,
   renderedChatCount: 0,
@@ -57,6 +58,9 @@ const state = {
   mapHasCentered: false,
   navTarget: loadPreference('lm_nav_target_v1', null),
   showAllNodes: loadPreference('lm_show_all_nodes_v1', false),
+  wakeLockEnabled: loadPreference('lm_wake_lock_v1', false),
+  wakeLockSentinel: null,
+  wakeLockError: null,
   navSignature: '',
   navLine: null,
   nodeIdentity: null,
@@ -79,10 +83,16 @@ function init() {
   loadGrantedDevices();
   render();
   renderMessages();
-  if (location.hash === '#chat') {
+  if (location.hash === '#map') {
+    setTab('map');
+  } else if (location.hash === '#chat') {
     setTab('chat');
   }
+  document.addEventListener('visibilitychange', onVisibilityChange);
   setInterval(renderFreshness, 1000);
+  if (state.wakeLockEnabled) {
+    acquireWakeLock();
+  }
 }
 
 function bindEvents() {
@@ -100,6 +110,9 @@ function bindEvents() {
   });
   $('gpsBtn').addEventListener('click', toggleGps);
   $('compassBtn').addEventListener('click', toggleCompass);
+  $('wakeLockToggle').addEventListener('change', (event) => {
+    setWakeLock(event.target.checked);
+  });
   $('mapCenterBtn').addEventListener('click', () => centerMap(true));
   $('navTargetSelect').addEventListener('change', (event) => {
     state.navTarget = event.target.value || null;
@@ -127,6 +140,7 @@ function bindEvents() {
     renderChatMeta();
   });
   $('sendBtn').addEventListener('click', sendText);
+  $('sosBtn').addEventListener('click', sendSos);
   $('clearChatBtn').addEventListener('click', () => {
     if (chat.count === 0) {
       return;
@@ -136,6 +150,7 @@ function bindEvents() {
     }
   });
   $('monitorTab').addEventListener('click', () => setTab('monitor', true));
+  $('mapTab').addEventListener('click', () => setTab('map', true));
   $('chatTab').addEventListener('click', () => setTab('chat', true));
   $('installBtn').addEventListener('click', installApp);
   $('notifyBtn').addEventListener('click', requestNotifications);
@@ -178,7 +193,13 @@ function onChatChange() {
 }
 
 function onHashChange() {
-  setTab(location.hash === '#chat' ? 'chat' : 'monitor');
+  if (location.hash === '#chat') {
+    setTab('chat');
+  } else if (location.hash === '#map') {
+    setTab('map');
+  } else {
+    setTab('monitor');
+  }
 }
 
 async function requestNotifications() {
@@ -538,6 +559,107 @@ function renderGps() {
   $('gpsError').hidden = !state.gpsError;
   $('gpsError').textContent = state.gpsError || '';
   $('gpsNote').hidden = !(state.geoActive && !ble.connected);
+  renderWakeLock();
+}
+
+function wakeLockSupported() {
+  return typeof navigator !== 'undefined' && 'wakeLock' in navigator;
+}
+
+function wakeLockStatusText() {
+  if (!wakeLockSupported()) {
+    return 'No soportado en este navegador; usá Auto-Lock > Nunca o la app Flutter.';
+  }
+  if (!state.wakeLockEnabled) {
+    return 'La pantalla puede apagarse normalmente.';
+  }
+  if (document.hidden) {
+    return 'Se reactiva al volver a la app.';
+  }
+  if (state.wakeLockError) {
+    return state.wakeLockError;
+  }
+  if (state.wakeLockSentinel) {
+    return 'Activo: la pantalla no se apagará.';
+  }
+  return 'Solicitando permiso al navegador...';
+}
+
+function renderWakeLock() {
+  const toggle = $('wakeLockToggle');
+  const supported = wakeLockSupported();
+  toggle.checked = state.wakeLockEnabled;
+  toggle.disabled = !supported;
+  $('wakeLockStatus').textContent = wakeLockStatusText();
+}
+
+async function setWakeLock(enabled) {
+  state.wakeLockEnabled = Boolean(enabled);
+  state.wakeLockError = null;
+  savePreference('lm_wake_lock_v1', state.wakeLockEnabled);
+  if (state.wakeLockEnabled) {
+    await acquireWakeLock();
+  } else {
+    await releaseWakeLock();
+  }
+  renderWakeLock();
+}
+
+async function acquireWakeLock() {
+  if (!state.wakeLockEnabled || document.hidden || state.wakeLockSentinel) {
+    renderWakeLock();
+    return;
+  }
+  if (!wakeLockSupported()) {
+    state.wakeLockError = 'No soportado en este navegador.';
+    renderWakeLock();
+    return;
+  }
+  try {
+    const sentinel = await navigator.wakeLock.request('screen');
+    if (!state.wakeLockEnabled) {
+      await sentinel.release().catch(() => {});
+      return;
+    }
+    state.wakeLockSentinel = sentinel;
+    state.wakeLockError = null;
+    sentinel.addEventListener('release', () => {
+      if (state.wakeLockSentinel === sentinel) {
+        state.wakeLockSentinel = null;
+      }
+      renderWakeLock();
+    });
+  } catch (error) {
+    state.wakeLockError =
+      error?.name === 'NotAllowedError'
+        ? 'El navegador bloqueó el Wake Lock.'
+        : 'No se pudo mantener la pantalla encendida.';
+  }
+  renderWakeLock();
+}
+
+async function releaseWakeLock() {
+  const sentinel = state.wakeLockSentinel;
+  state.wakeLockSentinel = null;
+  state.wakeLockError = null;
+  if (sentinel) {
+    try {
+      await sentinel.release();
+    } catch (_) {}
+  }
+  renderWakeLock();
+}
+
+function onVisibilityChange() {
+  if (!state.wakeLockEnabled) {
+    renderWakeLock();
+    return;
+  }
+  if (!document.hidden) {
+    acquireWakeLock();
+  } else {
+    renderWakeLock();
+  }
 }
 
 function renderPeers(snapshot) {
@@ -1015,6 +1137,7 @@ function renderChatMeta() {
 
 function renderTabs() {
   $('monitorTab').classList.toggle('active', state.tab === 'monitor');
+  $('mapTab').classList.toggle('active', state.tab === 'map');
   $('chatTab').classList.toggle('active', state.tab === 'chat');
   const badge = $('chatBadge');
   badge.hidden = state.unread === 0;
@@ -1082,10 +1205,14 @@ function setTab(tab, updateHash = false) {
   if (tab === 'chat') {
     state.unread = 0;
   }
-  if (updateHash && location.hash !== `#${tab}`) {
-    history.replaceState(null, '', `#${tab}`);
+  if (updateHash) {
+    const hash = tab === 'monitor' ? 'config' : tab;
+    if (location.hash !== `#${hash}`) {
+      history.replaceState(null, '', `#${hash}`);
+    }
   }
   $('monitorView').hidden = tab !== 'monitor';
+  $('mapView').hidden = tab !== 'map';
   $('chatView').hidden = tab !== 'chat';
   renderTabs();
   if (tab === 'chat') {
@@ -1094,7 +1221,12 @@ function setTab(tab, updateHash = false) {
       $('chatList').lastElementChild?.scrollIntoView({ block: 'end' });
     });
   } else {
-    requestAnimationFrame(() => state.map?.invalidateSize());
+    requestAnimationFrame(() => {
+      state.map?.invalidateSize();
+      if (tab === 'map') {
+        centerMap(true);
+      }
+    });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 }
@@ -1282,40 +1414,26 @@ function onGeoError(error) {
   renderGps();
 }
 
-async function sendText() {
+async function queueText(text, options) {
   if (state.sending || state.flushing) {
-    return;
+    return false;
   }
-  const input = $('messageInput');
-  const text = input.value.trim();
   const bytes = utf8Length(text);
   if (bytes === 0) {
-    return;
+    return false;
   }
   if (bytes > 180) {
     toast('El mensaje supera 180 bytes UTF-8');
-    return;
+    return false;
   }
   const identity = ble.status
     ? { id: ble.status.nodeId, bootId: ble.status.bootId }
     : state.nodeIdentity;
   if (!identity) {
     toast('Conectá una vez al nodo para poder enviar');
-    return;
+    return false;
   }
-  const target = state.broadcast ? '*' : state.target;
-  if (!state.broadcast && !target) {
-    toast('No hay peers para enviar 1:1');
-    return;
-  }
-  if (
-    !state.broadcast &&
-    ble.connected &&
-    !ble.peers.some((peer) => peer.id === target)
-  ) {
-    toast('El peer ya no está en la red');
-    return;
-  }
+  const { broadcast, target, successMessage, offlineMessage } = options;
   const packet = {
     msgId: randomMsgId(),
     sentAt: nowSeconds(),
@@ -1323,16 +1441,14 @@ async function sendText() {
     to: target,
     fromBootId: identity.bootId,
     ttl: 0,
-    flags: state.broadcast ? LM_TEXT_FLAG_BROADCAST : 0,
+    flags: broadcast ? LM_TEXT_FLAG_BROADCAST : 0,
     text,
-    broadcast: state.broadcast,
+    broadcast,
   };
   chat.addOutgoing(packet, LM_CHAT_STATUS.pending);
-  input.value = '';
-  state.draft = '';
   if (!ble.connected || !ble.status) {
-    toast('Mensaje guardado; se enviará al reconectar el nodo original');
-    return;
+    toast(offlineMessage || 'Mensaje guardado; se enviará al reconectar el nodo original');
+    return true;
   }
   state.sending = true;
   renderChatMeta();
@@ -1340,13 +1456,106 @@ async function sendText() {
     const sent = await ble.sendText(encodeTextPacket(packet));
     if (sent) {
       chat.setStatus(packet.msgId, LM_CHAT_STATUS.sent);
-      toast(state.broadcast ? 'Broadcast enviado' : `Enviado a ${target}`);
+      toast(successMessage || (broadcast ? 'Broadcast enviado' : `Enviado a ${target}`));
     } else {
       toast('Mensaje guardado para reintentar');
     }
   } finally {
     state.sending = false;
     renderChatMeta();
+  }
+  return true;
+}
+
+async function sendText() {
+  const input = $('messageInput');
+  const text = input.value.trim();
+  if (!text) {
+    return;
+  }
+  if (utf8Length(text) > 180) {
+    toast('El mensaje supera 180 bytes UTF-8');
+    return;
+  }
+  const broadcast = state.broadcast;
+  const target = broadcast ? '*' : state.target;
+  if (!broadcast && !target) {
+    toast('No hay peers para enviar 1:1');
+    return;
+  }
+  if (
+    !broadcast &&
+    ble.connected &&
+    !ble.peers.some((peer) => peer.id === target)
+  ) {
+    toast('El peer ya no está en la red');
+    return;
+  }
+  const queued = await queueText(text, { broadcast, target });
+  if (queued) {
+    input.value = '';
+    state.draft = '';
+  }
+}
+
+function getSosFix() {
+  const fix = state.lastFix;
+  if (fix && Date.now() - fix.timestamp <= 60000) {
+    return Promise.resolve(fix);
+  }
+  if (!navigator.geolocation) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) =>
+        resolve({
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+          accuracy: Number(position.coords.accuracy) || 0,
+          altitude: Number.isFinite(position.coords.altitude)
+            ? position.coords.altitude
+            : 0,
+          timestamp: Number(position.timestamp) || Date.now(),
+        }),
+      () => resolve(null),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 12000 },
+    );
+  });
+}
+
+function formatSosText(fix) {
+  const lat = fix.lat.toFixed(5);
+  const lon = fix.lon.toFixed(5);
+  const accuracy = Math.round(fix.accuracy || 0);
+  const altitude = Math.round(fix.altitude || 0);
+  return `SOS · ${lat},${lon} · ±${accuracy} m · alt ${altitude} m · ${formatClock(fix.timestamp)}`;
+}
+
+async function sendSos() {
+  if (state.sosSending || state.sending || state.flushing) {
+    return;
+  }
+  const button = $('sosBtn');
+  state.sosSending = true;
+  button.disabled = true;
+  button.textContent = 'ENVIANDO...';
+  try {
+    const fix = await getSosFix();
+    if (!fix) {
+      toast('No se pudo obtener tu ubicación para el SOS');
+      return;
+    }
+    await queueText(formatSosText(fix), {
+      broadcast: true,
+      target: '*',
+      successMessage: 'SOS broadcast enviado',
+      offlineMessage: 'SOS guardado; se enviará al reconectar',
+    });
+  } finally {
+    state.sosSending = false;
+    button.disabled = false;
+    button.textContent = 'SOS';
   }
 }
 
