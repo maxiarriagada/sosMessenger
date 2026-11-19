@@ -1,10 +1,11 @@
-const CACHE_NAME = 'lora-messenger-web-v5';
+const CACHE_NAME = 'lora-messenger-web-v6';
 
 const APP_SHELL = [
   './',
   './index.html',
-  './styles.css',
-  './app.js',
+  './index.html?v=6',
+  './styles.css?v=6',
+  './app.js?v=6',
   './lm_ble.js',
   './lm_chat_store.js',
   './lm_geo.js',
@@ -51,7 +52,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: 'no-store' })
       .then((response) => {
         if (response.ok && response.type === 'basic') {
           const copy = response.clone();

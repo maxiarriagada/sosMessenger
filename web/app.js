@@ -110,7 +110,7 @@ function bindEvents() {
   });
   $('gpsBtn').addEventListener('click', toggleGps);
   $('compassBtn').addEventListener('click', toggleCompass);
-  $('wakeLockToggle').addEventListener('change', (event) => {
+  $('wakeLockToggle')?.addEventListener('change', (event) => {
     setWakeLock(event.target.checked);
   });
   $('mapCenterBtn').addEventListener('click', () => centerMap(true));
@@ -140,7 +140,7 @@ function bindEvents() {
     renderChatMeta();
   });
   $('sendBtn').addEventListener('click', sendText);
-  $('sosBtn').addEventListener('click', sendSos);
+  $('sosBtn')?.addEventListener('click', sendSos);
   $('clearChatBtn').addEventListener('click', () => {
     if (chat.count === 0) {
       return;
@@ -150,7 +150,7 @@ function bindEvents() {
     }
   });
   $('monitorTab').addEventListener('click', () => setTab('monitor', true));
-  $('mapTab').addEventListener('click', () => setTab('map', true));
+  $('mapTab')?.addEventListener('click', () => setTab('map', true));
   $('chatTab').addEventListener('click', () => setTab('chat', true));
   $('installBtn').addEventListener('click', installApp);
   $('notifyBtn').addEventListener('click', requestNotifications);
@@ -587,10 +587,16 @@ function wakeLockStatusText() {
 
 function renderWakeLock() {
   const toggle = $('wakeLockToggle');
+  if (!toggle) {
+    return;
+  }
   const supported = wakeLockSupported();
   toggle.checked = state.wakeLockEnabled;
   toggle.disabled = !supported;
-  $('wakeLockStatus').textContent = wakeLockStatusText();
+  const status = $('wakeLockStatus');
+  if (status) {
+    status.textContent = wakeLockStatusText();
+  }
 }
 
 async function setWakeLock(enabled) {
@@ -1137,11 +1143,13 @@ function renderChatMeta() {
 
 function renderTabs() {
   $('monitorTab').classList.toggle('active', state.tab === 'monitor');
-  $('mapTab').classList.toggle('active', state.tab === 'map');
+  $('mapTab')?.classList.toggle('active', state.tab === 'map');
   $('chatTab').classList.toggle('active', state.tab === 'chat');
   const badge = $('chatBadge');
-  badge.hidden = state.unread === 0;
-  badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+  if (badge) {
+    badge.hidden = state.unread === 0;
+    badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+  }
 }
 
 function renderMessages() {
@@ -1211,8 +1219,11 @@ function setTab(tab, updateHash = false) {
       history.replaceState(null, '', `#${hash}`);
     }
   }
-  $('monitorView').hidden = tab !== 'monitor';
-  $('mapView').hidden = tab !== 'map';
+  const mapView = $('mapView');
+  $('monitorView').hidden = tab !== 'monitor' && (tab !== 'map' || Boolean(mapView));
+  if (mapView) {
+    mapView.hidden = tab !== 'map';
+  }
   $('chatView').hidden = tab !== 'chat';
   renderTabs();
   if (tab === 'chat') {
@@ -1228,6 +1239,11 @@ function setTab(tab, updateHash = false) {
       }
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (tab === 'map' && !mapView) {
+      requestAnimationFrame(() => {
+        $('mapCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
   }
 }
 
@@ -1537,9 +1553,15 @@ async function sendSos() {
     return;
   }
   const button = $('sosBtn');
+  const label = button?.querySelector('.nav-label');
   state.sosSending = true;
-  button.disabled = true;
-  button.textContent = 'ENVIANDO...';
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+  }
+  if (label) {
+    label.textContent = '...';
+  }
   try {
     const fix = await getSosFix();
     if (!fix) {
@@ -1554,8 +1576,13 @@ async function sendSos() {
     });
   } finally {
     state.sosSending = false;
-    button.disabled = false;
-    button.textContent = 'SOS';
+    if (button) {
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+    }
+    if (label) {
+      label.textContent = 'SOS';
+    }
   }
 }
 
@@ -1576,7 +1603,9 @@ function registerServiceWorker() {
   if (!('serviceWorker' in navigator) || location.protocol === 'file:') {
     return;
   }
-  navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+  navigator.serviceWorker
+    .register('./service-worker.js?v=6', { updateViaCache: 'none' })
+    .catch(() => {});
 }
 
 function infoItem(label, value) {
