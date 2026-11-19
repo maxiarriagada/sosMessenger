@@ -1,0 +1,797 @@
+#include "web_server.h"
+
+#include <ArduinoJson.h>
+#include <AsyncJson.h>
+#include <ESPAsyncWebServer.h>
+#include <LittleFS.h>
+#include <WiFi.h>
+
+#include "auth.h"
+#include "config.h"
+#include "location.h"
+#include "wifi_ap.h"
+
+static AsyncWebServer server(80);
+
+static String apRootUrl() {
+  return String("http://") + WiFi.softAPIP().toString() + "/";
+}
+
+static void addSecurityHeaders(AsyncWebServerResponse *response,
+                               bool cacheable) {
+  if (response == nullptr) {
+    return;
+  }
+
+  response->addHeader("X-Content-Type-Options", "nosniff");
+  response->addHeader("X-Frame-Options", "DENY");
+  response->addHeader("Referrer-Policy", "no-referrer");
+  response->addHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' "
+      "'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org "
+      "https://*.tile.openstreetmap.org; connect-src 'self'; font-src 'self'; "
+      "manifest-src 'self'; object-src 'none'; base-uri 'none'; "
+      "form-action 'self'; frame-ancestors 'none'");
+  response->addHeader("Cache-Control",
+                      cacheable ? "public, max-age=31536000, immutable"
+                                : "no-store");
+}
+
+static void sendJsonResponse(AsyncWebServerRequest *request, int code,
+                             const JsonDocument &doc,
+                             const String &setCookie = String(),
+                             int retryAfter = -1) {
+  String out;
+  serializeJson(doc, out);
+
+  AsyncWebServerResponse *response =
+      request->beginResponse(code, "application/json; charset=utf-8", out);
+  if (!setCookie.isEmpty()) {
+    response->addHeader("Set-Cookie", setCookie);
+  }
+  if (retryAfter >= 0) {
+    response->addHeader("Retry-After", String(retryAfter));
+  }
+  addSecurityHeaders(response, false);
+  request->send(response);
+}
+
+static void sendJson(AsyncWebServerRequest *request, int code,
+                     const JsonDocument &doc) {
+  sendJsonResponse(request, code, doc);
+}
+
+static void sendJsonError(AsyncWebServerRequest *request, int code,
+                          const char *message, int retryAfter = -1) {
+  JsonDocument doc;
+  doc["error"] = message;
+  if (retryAfter >= 0) {
+    doc["retry_after"] = retryAfter;
+  }
+  sendJsonResponse(request, code, doc, String(), retryAfter);
+}
+
+static bool isSameOrigin(AsyncWebServerRequest *request) {
+  const String origin = request->header("Origin");
+  if (origin.length() == 0) {
+    return true;
+  }
+  if (origin == "null") {
+    return false;
+  }
+  const String host = WiFi.softAPIP().toString();
+  return origin == String("http://") + host ||
+         origin == String("http://") + host + ":80";
+}
+
+static String requestToken(AsyncWebServerRequest *request) {
+  return authExtractToken(request->header("Cookie"));
+}
+
+static IPAddress requestIp(AsyncWebServerRequest *request) {
+  return request->client() != nullptr ? request->client()->remoteIP()
+                                      : IPAddress();
+}
+
+static bool requireAuth(AsyncWebServerRequest *request,
+                        AuthSessionInfo *sessionOut = nullptr) {
+  const AuthSessionInfo session = authCheckSession(requestToken(request));
+  if (sessionOut != nullptr) {
+    *sessionOut = session;
+  }
+  if (!session.valid) {
+    sendJsonError(request, 401, "no autenticado");
+    return false;
+  }
+  return true;
+}
+
+static bool allowAuthenticatedPost(AsyncWebServerRequest *request,
+                                   AuthSessionInfo *sessionOut = nullptr) {
+  if (!isSameOrigin(request)) {
+    sendJsonError(request, 403, "origen no permitido");
+    return false;
+  }
+  return requireAuth(request, sessionOut);
+}
+
+static String requestClientId(AsyncWebServerRequest *request) {
+  const AsyncWebParameter *param = request->getParam("client_id", false);
+  String clientId = param != nullptr ? param->value() : String();
+  if (clientId.length() > LM_PHONE_ID_MAX) {
+    return String();
+  }
+  return clientId;
+}
+
+static int locationStatus(LocationResult result) {
+  switch (result) {
+  case LocationResult::Ok:
+    return 200;
+  case LocationResult::InvalidInput:
+    return 400;
+  case LocationResult::NotFound:
+    return 404;
+  case LocationResult::RateLimited:
+    return 429;
+  case LocationResult::InternalError:
+    return 500;
+  default:
+    return 400;
+  }
+}
+
+static void sendLocationError(AsyncWebServerRequest *request,
+                              LocationResult result, const String &message,
+                              uint32_t retryAfter = 0) {
+  JsonDocument doc;
+  doc["ok"] = false;
+  doc["error"] = message.length() > 0 ? message : "no se pudo completar";
+  const int retrySeconds =
+      result == LocationResult::RateLimited ? (int)retryAfter : -1;
+  if (retrySeconds >= 0) {
+    doc["retry_after"] = retrySeconds;
+  }
+  sendJsonResponse(request, locationStatus(result), doc, String(),
+                   retrySeconds);
+}
+
+static void sendText(AsyncWebServerRequest *request, int code,
+                     const char *text) {
+  AsyncWebServerResponse *response =
+      request->beginResponse(code, "text/plain; charset=utf-8", text);
+  addSecurityHeaders(response, false);
+  request->send(response);
+}
+
+static void sendRedirect(AsyncWebServerRequest *request, const String &location) {
+  AsyncWebServerResponse *response =
+      request->beginResponse(302, "text/plain; charset=utf-8", "");
+  if (response != nullptr) {
+    response->addHeader("Location", location);
+  }
+  addSecurityHeaders(response, false);
+  request->send(response);
+}
+
+static String readTextFile(const char *path) {
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    return String();
+  }
+  String text = file.readString();
+  file.close();
+  return text;
+}
+
+static String contentTypeFor(const String &path) {
+  if (path.endsWith(".html")) {
+    return "text/html; charset=utf-8";
+  }
+  if (path.endsWith(".js")) {
+    return "application/javascript; charset=utf-8";
+  }
+  if (path.endsWith(".css")) {
+    return "text/css; charset=utf-8";
+  }
+  if (path.endsWith(".json")) {
+    return "application/json; charset=utf-8";
+  }
+  if (path.endsWith(".svg")) {
+    return "image/svg+xml";
+  }
+  if (path.endsWith(".png")) {
+    return "image/png";
+  }
+  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (path.endsWith(".ico")) {
+    return "image/x-icon";
+  }
+  if (path.endsWith(".woff2")) {
+    return "font/woff2";
+  }
+  if (path.endsWith(".webmanifest")) {
+    return "application/manifest+json";
+  }
+  if (path.endsWith(".txt")) {
+    return "text/plain; charset=utf-8";
+  }
+  return "application/octet-stream";
+}
+
+static bool sendFile(AsyncWebServerRequest *request, const String &path) {
+  if (path.startsWith("/certs/") || path.endsWith(".key")) {
+    return false;
+  }
+
+  if (!LittleFS.exists(path)) {
+    return false;
+  }
+
+  AsyncWebServerResponse *response =
+      request->beginResponse(LittleFS, path, contentTypeFor(path));
+  if (response == nullptr) {
+    return false;
+  }
+
+  addSecurityHeaders(response, path.startsWith("/assets/"));
+  request->send(response);
+  return true;
+}
+
+static void handleHealth(AsyncWebServerRequest *request) {
+  JsonDocument doc;
+  doc["name"] = FW_NAME;
+  doc["version"] = FW_VERSION;
+  doc["role"] = "hub";
+  doc["api"] = 1;
+  doc["uptime_ms"] = millis();
+  doc["uptime_s"] = millis() / 1000;
+  doc["heap_free"] = ESP.getFreeHeap();
+  doc["fs_total"] = LittleFS.totalBytes();
+  doc["fs_used"] = LittleFS.usedBytes();
+
+  sendJson(request, 200, doc);
+}
+
+static void handleState(AsyncWebServerRequest *request) {
+  JsonDocument doc;
+  doc["api"] = 1;
+  doc["fw"]["name"] = FW_NAME;
+  doc["fw"]["version"] = FW_VERSION;
+  doc["fw"]["role"] = "hub";
+  doc["ap"]["ssid"] = wifiApSsid();
+  doc["ap"]["ip"] = WiFi.softAPIP().toString();
+
+  const bool configured = authConfigured();
+  const bool setupOpen = authSetupOpen();
+  const AuthSessionInfo session = authCheckSession(requestToken(request));
+
+  doc["configured"] = configured;
+  doc["setup"]["open"] = setupOpen;
+  doc["setup"]["pin_required"] = false;
+  doc["setup"]["expires_in"] = authSetupSecondsLeft();
+  doc["setup"]["attempts_left"] = 0;
+  doc["authenticated"] = session.valid;
+  if (session.valid) {
+    doc["username"] = session.username;
+  }
+
+  doc["uptime_s"] = millis() / 1000;
+  doc["heap_free"] = ESP.getFreeHeap();
+
+  if (session.valid) {
+    locationFillState(doc.as<JsonObject>(), requestClientId(request));
+  }
+
+  sendJson(request, 200, doc);
+}
+
+static void handleSetup(AsyncWebServerRequest *request, JsonVariant &json) {
+  if (!isSameOrigin(request)) {
+    sendJsonError(request, 403, "origen no permitido");
+    return;
+  }
+
+  const String username = json["username"].as<String>();
+  const String password = json["password"].as<String>();
+
+  String token;
+  String message;
+  const AuthResult result = authSetup(username, password, token, message);
+
+  JsonDocument doc;
+  int code = 400;
+  int retryAfter = -1;
+
+  switch (result) {
+  case AuthResult::Ok:
+    code = 201;
+    doc["ok"] = true;
+    doc["configured"] = true;
+    doc["username"] = username;
+    break;
+  case AuthResult::InvalidInput:
+    code = 400;
+    break;
+  case AuthResult::AlreadyConfigured:
+    code = 409;
+    break;
+  case AuthResult::SetupClosed:
+    code = 403;
+    break;
+  case AuthResult::InternalError:
+    code = 500;
+    break;
+  default:
+    code = 400;
+    break;
+  }
+
+  if (!doc["ok"].is<bool>()) {
+    doc["ok"] = false;
+    doc["error"] = message.length() > 0 ? message : "no se pudo completar";
+  }
+
+  sendJsonResponse(request, code, doc,
+                   result == AuthResult::Ok
+                       ? authBuildSetCookie(token, false)
+                       : String(),
+                   retryAfter);
+}
+
+static void handleLogin(AsyncWebServerRequest *request, JsonVariant &json) {
+  if (!isSameOrigin(request)) {
+    sendJsonError(request, 403, "origen no permitido");
+    return;
+  }
+
+  const String username = json["username"].as<String>();
+  const String password = json["password"].as<String>();
+  const IPAddress clientIp =
+      request->client() != nullptr ? request->client()->remoteIP()
+                                   : IPAddress();
+
+  String token;
+  String message;
+  uint32_t retryAfter = 0;
+  const AuthResult result =
+      authLogin(username, password, clientIp, token, message, retryAfter);
+
+  JsonDocument doc;
+  int code = 401;
+  int retryAfterSeconds = -1;
+
+  switch (result) {
+  case AuthResult::Ok:
+    code = 200;
+    doc["ok"] = true;
+    doc["authenticated"] = true;
+    doc["username"] = username;
+    break;
+  case AuthResult::NotConfigured:
+    code = 409;
+    break;
+  case AuthResult::InvalidCredentials:
+    code = 401;
+    break;
+  case AuthResult::RateLimited:
+    code = 429;
+    retryAfterSeconds =
+        retryAfter > 0 ? (int)retryAfter
+                       : (int)(LM_LOGIN_BLOCK_MS / 1000UL);
+    break;
+  case AuthResult::InternalError:
+    code = 500;
+    break;
+  default:
+    code = 400;
+    break;
+  }
+
+  if (result != AuthResult::Ok) {
+    doc["ok"] = false;
+    doc["error"] = message.length() > 0 ? message : "no se pudo iniciar sesion";
+  }
+
+  sendJsonResponse(request, code, doc,
+                   result == AuthResult::Ok
+                       ? authBuildSetCookie(token, false)
+                       : String(),
+                   retryAfterSeconds);
+}
+
+static void handleLogout(AsyncWebServerRequest *request) {
+  if (!isSameOrigin(request)) {
+    sendJsonError(request, 403, "origen no permitido");
+    return;
+  }
+
+  authLogout(requestToken(request));
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["authenticated"] = false;
+  sendJsonResponse(request, 200, doc, authBuildSetCookie(String(), true));
+}
+
+static void handleLocationActive(AsyncWebServerRequest *request,
+                                 JsonVariant &json) {
+  if (!allowAuthenticatedPost(request)) {
+    return;
+  }
+
+  const String source = json["source"].as<String>();
+  String message;
+  const LocationResult result = locationSetSelectedSource(source, message);
+
+  if (result != LocationResult::Ok) {
+    sendLocationError(request, result, message);
+    return;
+  }
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["selected"] = locationSelectedSource();
+  sendJson(request, 200, doc);
+}
+
+static void handleLocationManual(AsyncWebServerRequest *request,
+                                 JsonVariant &json) {
+  if (!allowAuthenticatedPost(request)) {
+    return;
+  }
+
+  if (!json["lat"].is<double>() || !json["lon"].is<double>()) {
+    sendLocationError(request, LocationResult::InvalidInput,
+                      "lat y lon son obligatorios");
+    return;
+  }
+
+  float accuracy = 0;
+  if (!json["accuracy"].isNull()) {
+    if (!json["accuracy"].is<double>()) {
+      sendLocationError(request, LocationResult::InvalidInput,
+                        "precision invalida");
+      return;
+    }
+    accuracy = (float)json["accuracy"].as<double>();
+  }
+
+  String message;
+  const LocationResult result = locationSetManual(
+      json["lat"].as<double>(), json["lon"].as<double>(), accuracy, message);
+
+  if (result != LocationResult::Ok) {
+    sendLocationError(request, result, message);
+    return;
+  }
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["selected"] = locationSelectedSource();
+  sendJson(request, 200, doc);
+}
+
+static void handleLocationPhone(AsyncWebServerRequest *request,
+                                JsonVariant &json) {
+  if (!allowAuthenticatedPost(request)) {
+    return;
+  }
+
+  const String clientId = json["client_id"].as<String>();
+  const String label = json["label"].as<String>();
+  const bool hasLat = json["lat"].is<double>();
+  const bool hasLon = json["lon"].is<double>();
+
+  if (hasLat != hasLon) {
+    sendLocationError(request, LocationResult::InvalidInput,
+                      "lat y lon deben enviarse juntos");
+    return;
+  }
+
+  float accuracy = 0;
+  if (hasLat && !json["accuracy"].isNull()) {
+    if (!json["accuracy"].is<double>()) {
+      sendLocationError(request, LocationResult::InvalidInput,
+                        "precision invalida");
+      return;
+    }
+    accuracy = (float)json["accuracy"].as<double>();
+  }
+
+  uint32_t retryAfter = 0;
+  String message;
+  const LocationResult result = locationUpdatePhone(
+      clientId, label, requestIp(request), request->header("User-Agent"),
+      hasLat, hasLat ? json["lat"].as<double>() : 0.0,
+      hasLon ? json["lon"].as<double>() : 0.0, accuracy, retryAfter, message);
+
+  if (result != LocationResult::Ok) {
+    sendLocationError(request, result, message, retryAfter);
+    return;
+  }
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["client_id"] = clientId;
+  doc["has_fix"] = hasLat;
+  sendJson(request, 200, doc);
+}
+
+static void handleLocationRequest(AsyncWebServerRequest *request,
+                                  JsonVariant &json) {
+  AuthSessionInfo session;
+  if (!allowAuthenticatedPost(request, &session)) {
+    return;
+  }
+
+  const String target = json["target"].as<String>();
+  String message;
+  const LocationResult result =
+      locationCreateRequest(target, session.username, message);
+
+  if (result != LocationResult::Ok) {
+    sendLocationError(request, result, message);
+    return;
+  }
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["target"] = target;
+  sendJson(request, 200, doc);
+}
+
+static void handleLocationClear(AsyncWebServerRequest *request,
+                                JsonVariant &json) {
+  if (!allowAuthenticatedPost(request)) {
+    return;
+  }
+
+  const String source = json["source"].as<String>();
+  String message;
+  const LocationResult result = locationClear(source, message);
+
+  if (result != LocationResult::Ok) {
+    sendLocationError(request, result, message);
+    return;
+  }
+
+  JsonDocument doc;
+  doc["ok"] = true;
+  doc["selected"] = locationSelectedSource();
+  sendJson(request, 200, doc);
+}
+
+static void handleCaDownload(AsyncWebServerRequest *request) {
+  const String pem = readTextFile(LM_CA_CERT_PATH);
+  if (pem.isEmpty()) {
+    sendText(request, 404, "CA not found");
+    return;
+  }
+
+  AsyncWebServerResponse *response =
+      request->beginResponse(200, "application/x-x509-ca-cert", pem);
+  if (response == nullptr) {
+    sendText(request, 500, "response failed");
+    return;
+  }
+  response->addHeader("Content-Disposition",
+                      "attachment; filename=\"lora-ca.crt\"");
+  addSecurityHeaders(response, false);
+  request->send(response);
+}
+
+static void handleInstall(AsyncWebServerRequest *request) {
+  String fingerprint = readTextFile(LM_CA_FINGERPRINT_PATH);
+  fingerprint.trim();
+  if (fingerprint.isEmpty()) {
+    fingerprint = "no disponible";
+  }
+
+  String html = R"HTML(<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Instalar CA - LoRaMessenger</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px;background:#101820;color:#e8eef3}
+main{max-width:720px;margin:0 auto}
+h1{font-size:1.4rem;margin:0 0 8px}
+h2{font-size:1rem;margin:0 0 10px;color:#9fb3c8}
+p,li{line-height:1.5}
+code{background:#1b2836;padding:2px 5px;border-radius:4px;word-break:break-all}
+.card{background:#16232f;border:1px solid #273b4d;border-radius:10px;padding:16px;margin:12px 0}
+.button{display:inline-block;background:#2f80ed;color:#fff;text-decoration:none;border-radius:8px;padding:12px 16px;font-weight:600}
+a{color:#7cc4ff}
+.muted{color:#9fb3c8}
+ol,ul{padding-left:22px}
+</style>
+</head>
+<body>
+<main>
+<h1>Instalar certificado CA</h1>
+<p>El hub usa un certificado HTTPS firmado por una CA local. Instalá esta CA una sola vez para que el teléfono confíe en <code>https://%%HOST%%</code>.</p>
+
+<div class="card">
+<h2>1. Descargar el certificado</h2>
+<p><a class="button" href="/ca.crt" download="lora-ca.crt">Descargar lora-ca.crt</a></p>
+<p class="muted">SHA-256:<br><code>%%FINGERPRINT%%</code></p>
+</div>
+
+<div class="card">
+<h2>2. Instalar en Android</h2>
+<ol>
+<li>Abrí <b>Ajustes → Seguridad → Cifrado y credenciales → Instalar certificado</b>.</li>
+<li>Elegí <b>Certificado CA</b> y luego <b>Instalar de todos modos</b>.</li>
+<li>Buscá <code>lora-ca.crt</code> en Descargas y confirmá con tu PIN/patrón.</li>
+<li>Verificá que el fingerprint coincida con el de arriba.</li>
+</ol>
+</div>
+
+<div class="card">
+<h2>2. Instalar en iPhone</h2>
+<ol>
+<li>Descargá el archivo con Safari y permití la descarga del perfil.</li>
+<li>Andá a <b>Ajustes → General → VPN y gestión de dispositivos</b> e instalá el perfil.</li>
+<li>Luego abrí <b>Ajustes → General → Información → Ajustes de confianza de certificados</b>.</li>
+<li>Activá la confianza total para <b>LoRaMessenger Local CA</b>.</li>
+</ol>
+</div>
+
+<div class="card">
+<h2>3. Abrir la app segura</h2>
+<p>Cuando termines, abrí <a href="https://%%HOST%%/tls-test">https://%%HOST%%/tls-test</a>. No debería aparecer la advertencia de certificado.</p>
+</div>
+
+<p class="muted">Instalá esta CA solo si confiás en el hub LoRaMessenger. Podés quitarla después desde la configuración de certificados del teléfono.</p>
+</main>
+</body>
+</html>)HTML";
+
+  html.replace("%%HOST%%", WiFi.softAPIP().toString());
+  html.replace("%%FINGERPRINT%%", fingerprint);
+
+  AsyncWebServerResponse *response =
+      request->beginResponse(200, "text/html; charset=utf-8", html);
+  if (response == nullptr) {
+    sendText(request, 500, "response failed");
+    return;
+  }
+  addSecurityHeaders(response, false);
+  request->send(response);
+}
+
+static void handleCaptive(AsyncWebServerRequest *request) {
+  sendRedirect(request, apRootUrl());
+}
+
+static void handleNotFound(AsyncWebServerRequest *request) {
+  const String path = request->url();
+
+  if (request->method() != HTTP_GET) {
+    if (path == "/api" || path.startsWith("/api/")) {
+      sendJsonError(request, 405, "method not allowed");
+    } else {
+      sendText(request, 405, "method not allowed");
+    }
+    return;
+  }
+
+  if (path == "/api" || path.startsWith("/api/")) {
+    sendJsonError(request, 404, "not found");
+    return;
+  }
+
+  if (path == "/favicon.ico") {
+    AsyncWebServerResponse *response =
+        request->beginResponse(204, "text/plain; charset=utf-8", "");
+    addSecurityHeaders(response, false);
+    request->send(response);
+    return;
+  }
+
+  if (path == "/certs" || path.startsWith("/certs/")) {
+    sendText(request, 404, "not found");
+    return;
+  }
+
+  String file = path;
+  if (file.endsWith("/")) {
+    file += "index.html";
+  }
+
+  if (sendFile(request, file)) {
+    return;
+  }
+
+  if (file.indexOf('.') >= 0) {
+    sendText(request, 404, "not found");
+    return;
+  }
+
+  if (sendFile(request, "/index.html")) {
+    return;
+  }
+
+  sendText(request, 404,
+           "LittleFS is empty. Run: pio run -e hub -t uploadfs");
+}
+
+void webServerBegin() {
+  server.on("/api/health", HTTP_GET, handleHealth);
+  server.on("/api/state", HTTP_GET, handleState);
+  server.on("/api/logout", HTTP_POST, handleLogout);
+  server.on("/install", HTTP_GET, handleInstall);
+  server.on("/ca.crt", HTTP_GET, handleCaDownload);
+
+  AsyncCallbackJsonWebHandler *setupHandler =
+      new AsyncCallbackJsonWebHandler("/api/setup", handleSetup);
+  setupHandler->setMethod(HTTP_POST);
+  setupHandler->setMaxContentLength(1024);
+  server.addHandler(setupHandler);
+
+  AsyncCallbackJsonWebHandler *loginHandler =
+      new AsyncCallbackJsonWebHandler("/api/login", handleLogin);
+  loginHandler->setMethod(HTTP_POST);
+  loginHandler->setMaxContentLength(1024);
+  server.addHandler(loginHandler);
+
+  AsyncCallbackJsonWebHandler *activeHandler =
+      new AsyncCallbackJsonWebHandler("/api/location/active",
+                                      handleLocationActive);
+  activeHandler->setMethod(HTTP_POST);
+  activeHandler->setMaxContentLength(512);
+  server.addHandler(activeHandler);
+
+  AsyncCallbackJsonWebHandler *manualHandler =
+      new AsyncCallbackJsonWebHandler("/api/location/manual",
+                                      handleLocationManual);
+  manualHandler->setMethod(HTTP_POST);
+  manualHandler->setMaxContentLength(512);
+  server.addHandler(manualHandler);
+
+  AsyncCallbackJsonWebHandler *phoneHandler =
+      new AsyncCallbackJsonWebHandler("/api/location/phone",
+                                      handleLocationPhone);
+  phoneHandler->setMethod(HTTP_POST);
+  phoneHandler->setMaxContentLength(1024);
+  server.addHandler(phoneHandler);
+
+  AsyncCallbackJsonWebHandler *requestHandler =
+      new AsyncCallbackJsonWebHandler("/api/location/request",
+                                      handleLocationRequest);
+  requestHandler->setMethod(HTTP_POST);
+  requestHandler->setMaxContentLength(512);
+  server.addHandler(requestHandler);
+
+  AsyncCallbackJsonWebHandler *clearHandler =
+      new AsyncCallbackJsonWebHandler("/api/location/clear",
+                                      handleLocationClear);
+  clearHandler->setMethod(HTTP_POST);
+  clearHandler->setMaxContentLength(512);
+  server.addHandler(clearHandler);
+
+  static const char *captivePaths[] = {
+      "/generate_204",
+      "/hotspot-detect.html",
+      "/library/test/success.html",
+      "/connecttest.txt",
+      "/ncsi.txt",
+      "/canonical.html",
+      "/success.txt",
+  };
+
+  for (const char *path : captivePaths) {
+    server.on(path, HTTP_GET, handleCaptive);
+  }
+
+  server.onNotFound(handleNotFound);
+  server.begin();
+
+  Serial.printf("[web] http://%s/\n", WiFi.softAPIP().toString().c_str());
+}

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>LoRaMessenger</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="card">
+      <header>
+        <h1>LoRaMessenger</h1>
+        <p class="subtitle">Hub &mdash; Etapa 3 (ESP-NOW redundante y nodos GPS)</p>
+      </header>
+
+      <p id="status" class="status">consultando...</p>
+
+      <section id="view-setup" class="view" style="display: none">
+        <h2>Configurar hub</h2>
+        <p class="note">
+          Crea el administrador de este hub. La ventana de configuración se
+          abre automáticamente en el primer arranque.
+        </p>
+        <p id="setup-countdown" class="hint">Consultando ventana de setup...</p>
+
+        <form id="setup-form" autocomplete="off">
+          <div class="field">
+            <label for="setup-username">Usuario</label>
+            <input
+              id="setup-username"
+              name="username"
+              type="text"
+              maxlength="32"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              required
+            />
+            <p class="hint">3-32 letras, números, punto, guion o _</p>
+          </div>
+
+          <div class="field">
+            <label for="setup-password">Contraseña</label>
+            <input
+              id="setup-password"
+              name="password"
+              type="password"
+              maxlength="64"
+              autocomplete="new-password"
+              required
+            />
+            <p class="hint">8-64 caracteres imprimibles</p>
+          </div>
+
+          <div class="field">
+            <label for="setup-confirm">Repetir contraseña</label>
+            <input
+              id="setup-confirm"
+              name="confirm"
+              type="password"
+              maxlength="64"
+              autocomplete="new-password"
+              required
+            />
+          </div>
+
+          <p id="setup-error" class="error" style="display: none"></p>
+
+          <div class="form-actions">
+            <button id="setup-submit" type="submit">Crear administrador</button>
+          </div>
+        </form>
+
+        <p id="setup-closed" class="note" style="display: none">
+          La ventana de configuración está cerrada. Reinicia el hub para
+          reabrirla. La protección física con PIN llega en la Etapa 2.
+        </p>
+      </section>
+
+      <section id="view-login" class="view" style="display: none">
+        <h2>Iniciar sesión</h2>
+        <p class="note">Accede con el administrador configurado en este hub.</p>
+
+        <form id="login-form" autocomplete="off">
+          <div class="field">
+            <label for="login-username">Usuario</label>
+            <input
+              id="login-username"
+              name="username"
+              type="text"
+              maxlength="32"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              required
+            />
+          </div>
+
+          <div class="field">
+            <label for="login-password">Contraseña</label>
+            <input
+              id="login-password"
+              name="password"
+              type="password"
+              maxlength="64"
+              autocomplete="current-password"
+              required
+            />
+          </div>
+
+          <p id="login-error" class="error" style="display: none"></p>
+
+          <div class="form-actions">
+            <button id="login-submit" type="submit">Entrar</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="view-dashboard" class="view" style="display: none">
+        <h2>Sesión activa</h2>
+
+        <div class="grid">
+          <div class="row"><span>Usuario</span><strong id="dash-username">-</strong></div>
+          <div class="row"><span>Firmware</span><strong id="dash-fw-name">-</strong></div>
+          <div class="row"><span>Versión</span><strong id="dash-fw-version">-</strong></div>
+          <div class="row"><span>Rol</span><strong id="dash-fw-role">-</strong></div>
+          <div class="row"><span>SSID</span><strong id="dash-ap-ssid">-</strong></div>
+          <div class="row"><span>IP</span><strong id="dash-ap-ip">-</strong></div>
+          <div class="row"><span>Configurado</span><strong id="dash-configured">-</strong></div>
+          <div class="row"><span>Uptime</span><strong id="dash-uptime">-</strong></div>
+          <div class="row"><span>Heap</span><strong id="dash-heap">-</strong></div>
+        </div>
+
+        <h2>Ubicación</h2>
+
+        <div id="phone-request" class="request-box" style="display: none">
+          <p id="phone-request-text" class="request-text"></p>
+          <div class="actions">
+            <button id="phone-request-send" type="button">Enviar ubicación</button>
+            <button id="phone-request-dismiss" type="button">Rechazar</button>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="row"><span>Fuente elegida</span><strong id="loc-selected">-</strong></div>
+          <div class="row"><span>Fuente activa</span><strong id="loc-active">-</strong></div>
+          <div class="row"><span>Coordenadas</span><strong id="loc-coords">-</strong></div>
+          <div class="row"><span>Precisión</span><strong id="loc-accuracy">-</strong></div>
+          <div class="row"><span>Actualizada</span><strong id="loc-age">-</strong></div>
+        </div>
+
+        <p id="loc-warning" class="warn" style="display: none"></p>
+
+        <div class="field">
+          <label for="loc-source">Fuente activa</label>
+          <select id="loc-source">
+            <option value="auto">Automático</option>
+            <option value="manual">Manual</option>
+          </select>
+          <p class="hint">
+            Automático usa GPS del hub, luego del nodo, luego el teléfono con
+            la ubicación más reciente.
+          </p>
+        </div>
+
+        <div class="actions">
+          <button id="loc-apply" type="button">Aplicar fuente</button>
+        </div>
+
+        <h3>Coordenadas manuales</h3>
+        <p class="note">
+          Guardar coordenadas manuales también selecciona la fuente Manual.
+        </p>
+        <form id="manual-form" autocomplete="off">
+          <div class="inline-fields">
+            <div class="field">
+              <label for="manual-lat">Latitud</label>
+              <input id="manual-lat" name="lat" type="number" step="any" min="-90" max="90" required />
+            </div>
+            <div class="field">
+              <label for="manual-lon">Longitud</label>
+              <input id="manual-lon" name="lon" type="number" step="any" min="-180" max="180" required />
+            </div>
+          </div>
+          <div class="field">
+            <label for="manual-acc">Precisión en metros (opcional)</label>
+            <input id="manual-acc" name="accuracy" type="number" step="any" min="0" />
+          </div>
+          <div class="form-actions">
+            <button id="manual-submit" type="submit">Guardar manual</button>
+          </div>
+        </form>
+
+        <h3>Nodos</h3>
+        <p id="nodes-empty" class="note">
+          Todavía no hay nodos registrados. Se agregan al recibir ESP-NOW.
+        </p>
+        <ul id="node-list" class="phone-list"></ul>
+
+        <h3>Teléfonos</h3>
+        <p id="phones-empty" class="note">Todavía no hay teléfonos registrados.</p>
+        <ul id="phone-list" class="phone-list"></ul>
+        <div class="actions">
+          <button id="request-auto" type="button">Pedir a cualquier teléfono</button>
+        </div>
+        <p id="request-status" class="hint">Sin solicitudes activas.</p>
+
+        <h3>Este teléfono</h3>
+        <div class="grid">
+          <div class="row"><span>Identificador</span><strong id="phone-id">-</strong></div>
+        </div>
+
+        <div class="field">
+          <label for="phone-label">Etiqueta del teléfono</label>
+          <input id="phone-label" type="text" maxlength="40" autocomplete="off" />
+        </div>
+
+        <div class="inline-fields">
+          <div class="field">
+            <label for="phone-lat">Latitud manual</label>
+            <input id="phone-lat" type="number" step="any" min="-90" max="90" />
+          </div>
+          <div class="field">
+            <label for="phone-lon">Longitud manual</label>
+            <input id="phone-lon" type="number" step="any" min="-180" max="180" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="phone-acc">Precisión en metros (opcional)</label>
+          <input id="phone-acc" type="number" step="any" min="0" />
+        </div>
+
+        <div class="actions">
+          <button id="phone-gps" type="button">Usar GPS del teléfono</button>
+          <button id="phone-manual" type="button">Enviar manual</button>
+          <button id="phone-register" type="button">Registrar teléfono</button>
+        </div>
+
+        <p id="phone-message" class="hint" style="display: none"></p>
+
+        <p id="dash-error" class="error" style="display: none"></p>
+
+        <div class="actions">
+          <button id="refresh" type="button">Actualizar</button>
+          <button id="logout" class="danger" type="button">Cerrar sesión</button>
+        </div>
+      </section>
+
+      <footer>
+        <a href="/api/health">/api/health</a>
+        <a href="/api/state">/api/state</a>
+      </footer>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

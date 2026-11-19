@@ -1,0 +1,24 @@
+# PlatformIO
+.pio/
+firmware/.pio/
+
+# Node / webapp
+node_modules/
+webapp/dist/
+
+# Local secrets
+secrets.h
+tools/certs-private/
+firmware/data/certs/
+mobile/ios/Flutter/ephemeral/
+*.key
+*.pem
+*.pfx
+*.p12
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

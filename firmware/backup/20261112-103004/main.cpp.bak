@@ -1,0 +1,65 @@
+#include <Arduino.h>
+
+#include "config.h"
+#include "storage.h"
+
+#if ROLE_HUB
+#include "auth.h"
+#include "captive_portal.h"
+#include "location.h"
+#include "tls_spike.h"
+#include "web_server.h"
+#include "wifi_ap.h"
+#endif
+
+static const char *roleName() {
+#if ROLE_HUB
+  return "hub";
+#elif ROLE_NODE
+  return "node";
+#else
+  return "unknown";
+#endif
+}
+
+void setup() {
+  Serial.begin(LM_SERIAL_BAUD);
+  delay(200);
+  Serial.printf("\n%s v%s role=%s\n", FW_NAME, FW_VERSION, roleName());
+
+  if (!storageBegin()) {
+    Serial.println("[boot] storage unavailable");
+  }
+
+#if ROLE_HUB
+  authBegin();
+  locationBegin();
+  wifiApBegin();
+  captivePortalBegin();
+  webServerBegin();
+#if LM_TLS_SPIKE
+  tlsSpikeBegin();
+#endif
+#else
+  Serial.println("[boot] node role: radio link is added in M5");
+#endif
+}
+
+void loop() {
+  static uint32_t lastHeartbeat = 0;
+  const uint32_t now = millis();
+
+#if ROLE_HUB
+  locationLoop();
+  captivePortalLoop();
+#endif
+
+  if (now - lastHeartbeat >= 10000) {
+    lastHeartbeat = now;
+    Serial.printf("[hb] uptime=%lus heap=%lu\n",
+                  (unsigned long)(now / 1000),
+                  (unsigned long)ESP.getFreeHeap());
+  }
+
+  delay(100);
+}

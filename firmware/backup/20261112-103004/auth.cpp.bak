@@ -1,0 +1,550 @@
+#include "auth.h"
+
+#include <Preferences.h>
+#include <PBKDF2_HMACBuilder.h>
+#include <SHA2Builder.h>
+#include <esp_random.h>
+
+#include "config.h"
+
+namespace {
+
+constexpr size_t kSaltLen = 16;
+constexpr size_t kHashLen = 32;
+constexpr size_t kTokenBytes = 32;
+constexpr size_t kTokenHexLen = kTokenBytes * 2;
+
+struct AdminConfig {
+  bool configured = false;
+  String username;
+  uint8_t salt[kSaltLen] = {0};
+  uint8_t hash[kHashLen] = {0};
+  uint32_t iterations = LM_PBKDF2_ITERATIONS;
+};
+
+struct Session {
+  bool used = false;
+  String token;
+  String username;
+  uint32_t createdAt = 0;
+  uint32_t lastSeenAt = 0;
+};
+
+struct LoginAttempt {
+  bool used = false;
+  IPAddress ip;
+  uint8_t failures = 0;
+  uint32_t windowStart = 0;
+  uint32_t blockedUntil = 0;
+};
+
+AdminConfig g_admin;
+Session g_sessions[LM_SESSION_MAX];
+LoginAttempt g_attempts[LM_AUTH_CLIENTS];
+uint32_t g_setupOpenedAt = 0;
+bool g_setupWindowStarted = false;
+
+const char *kHex = "0123456789abcdef";
+
+String bytesToHex(const uint8_t *data, size_t len) {
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; i++) {
+    out += kHex[data[i] >> 4];
+    out += kHex[data[i] & 0x0F];
+  }
+  return out;
+}
+
+int hexNibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return c - 'a' + 10;
+  }
+  if (c >= 'A' && c <= 'F') {
+    return c - 'A' + 10;
+  }
+  return -1;
+}
+
+bool hexToBytes(const String &hex, uint8_t *out, size_t outLen) {
+  if (hex.length() != outLen * 2) {
+    return false;
+  }
+  for (size_t i = 0; i < outLen; i++) {
+    const int hi = hexNibble(hex.charAt(i * 2));
+    const int lo = hexNibble(hex.charAt(i * 2 + 1));
+    if (hi < 0 || lo < 0) {
+      return false;
+    }
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
+}
+
+bool constantTimeEquals(const uint8_t *a, const uint8_t *b, size_t len) {
+  uint8_t diff = 0;
+  for (size_t i = 0; i < len; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff == 0;
+}
+
+bool constantTimeEquals(const String &a, const String &b) {
+  if (a.length() != b.length()) {
+    return false;
+  }
+  return constantTimeEquals((const uint8_t *)a.c_str(),
+                            (const uint8_t *)b.c_str(), a.length());
+}
+
+String hashPassword(const String &password, const uint8_t *salt, size_t saltLen,
+                    uint32_t iterations) {
+  SHA256Builder sha256;
+  PBKDF2_HMACBuilder pbkdf2(&sha256);
+  pbkdf2.begin();
+  pbkdf2.setPassword((const uint8_t *)password.c_str(), password.length());
+  pbkdf2.setSalt(salt, saltLen);
+  pbkdf2.setIterations(iterations);
+  pbkdf2.calculate();
+
+  uint8_t out[kHashLen] = {0};
+  pbkdf2.getBytes(out);
+  return bytesToHex(out, sizeof(out));
+}
+
+String makeToken() {
+  uint8_t raw[kTokenBytes];
+  esp_fill_random(raw, sizeof(raw));
+  return bytesToHex(raw, sizeof(raw));
+}
+
+bool validUsername(const String &username) {
+  if (username.length() < LM_USERNAME_MIN ||
+      username.length() > LM_USERNAME_MAX) {
+    return false;
+  }
+  for (size_t i = 0; i < username.length(); i++) {
+    const char c = username.charAt(i);
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                    c == '-';
+    if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validPassword(const String &password) {
+  if (password.length() < LM_PASSWORD_MIN ||
+      password.length() > LM_PASSWORD_MAX) {
+    return false;
+  }
+  for (size_t i = 0; i < password.length(); i++) {
+    const unsigned char c = (unsigned char)password.charAt(i);
+    if (c < 0x20 || c > 0x7E) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void loadAdmin() {
+  Preferences prefs;
+  if (!prefs.begin("lm", true)) {
+    return;
+  }
+
+  g_admin.configured = prefs.getBool("cfg", false);
+  g_admin.username = prefs.getString("user", "");
+  g_admin.iterations = prefs.getUInt("iter", LM_PBKDF2_ITERATIONS);
+  if (g_admin.iterations < 1000 || g_admin.iterations > 100000) {
+    g_admin.iterations = LM_PBKDF2_ITERATIONS;
+  }
+
+  const String saltHex = prefs.getString("salt", "");
+  const String hashHex = prefs.getString("hash", "");
+  prefs.end();
+
+  if (!g_admin.configured) {
+    return;
+  }
+
+  if (!hexToBytes(saltHex, g_admin.salt, sizeof(g_admin.salt)) ||
+      !hexToBytes(hashHex, g_admin.hash, sizeof(g_admin.hash)) ||
+      g_admin.username.length() == 0) {
+    Serial.println("[auth] corrupt config, opening setup");
+    g_admin.configured = false;
+    g_admin.username = "";
+    g_admin.iterations = LM_PBKDF2_ITERATIONS;
+    memset(g_admin.salt, 0, sizeof(g_admin.salt));
+    memset(g_admin.hash, 0, sizeof(g_admin.hash));
+  }
+}
+
+bool saveAdmin(const String &username, const uint8_t *salt, size_t saltLen,
+               const uint8_t *hash, size_t hashLen, uint32_t iterations) {
+  Preferences prefs;
+  if (!prefs.begin("lm", false)) {
+    Serial.println("[auth] NVS write open failed");
+    return false;
+  }
+
+  const String saltHex = bytesToHex(salt, saltLen);
+  const String hashHex = bytesToHex(hash, hashLen);
+
+  bool ok = prefs.putBool("cfg", true) == 1;
+  ok = ok && prefs.putString("user", username) == username.length();
+  ok = ok && prefs.putString("salt", saltHex) == saltHex.length();
+  ok = ok && prefs.putString("hash", hashHex) == hashHex.length();
+  ok = ok && prefs.putUInt("iter", iterations) == sizeof(uint32_t);
+  prefs.end();
+
+  return ok;
+}
+
+void startSetupWindow() {
+  g_setupOpenedAt = millis();
+  g_setupWindowStarted = true;
+  Serial.printf("[auth] setup window open (%lu min, no PIN)\n",
+                (unsigned long)(LM_SETUP_WINDOW_MS / 60000UL));
+}
+
+void clearSessions() {
+  for (size_t i = 0; i < LM_SESSION_MAX; i++) {
+    g_sessions[i].used = false;
+    g_sessions[i].token = "";
+    g_sessions[i].username = "";
+    g_sessions[i].createdAt = 0;
+    g_sessions[i].lastSeenAt = 0;
+  }
+}
+
+void clearAttempts() {
+  for (size_t i = 0; i < LM_AUTH_CLIENTS; i++) {
+    g_attempts[i].used = false;
+    g_attempts[i].ip = IPAddress();
+    g_attempts[i].failures = 0;
+    g_attempts[i].windowStart = 0;
+    g_attempts[i].blockedUntil = 0;
+  }
+}
+
+void pruneSessions(uint32_t now) {
+  for (size_t i = 0; i < LM_SESSION_MAX; i++) {
+    if (g_sessions[i].used &&
+        (uint32_t)(now - g_sessions[i].createdAt) >= LM_SESSION_TTL_MS) {
+      g_sessions[i].used = false;
+      g_sessions[i].token = "";
+      g_sessions[i].username = "";
+    }
+  }
+}
+
+String createSession(const String &username) {
+  const uint32_t now = millis();
+  pruneSessions(now);
+
+  Session *slot = nullptr;
+  for (size_t i = 0; i < LM_SESSION_MAX; i++) {
+    if (!g_sessions[i].used) {
+      slot = &g_sessions[i];
+      break;
+    }
+  }
+
+  if (slot == nullptr) {
+    slot = &g_sessions[0];
+    for (size_t i = 1; i < LM_SESSION_MAX; i++) {
+      if ((int32_t)(g_sessions[i].createdAt - slot->createdAt) < 0) {
+        slot = &g_sessions[i];
+      }
+    }
+  }
+
+  const String token = makeToken();
+  slot->used = true;
+  slot->token = token;
+  slot->username = username;
+  slot->createdAt = now;
+  slot->lastSeenAt = now;
+  return token;
+}
+
+LoginAttempt *findAttempt(const IPAddress &ip, uint32_t now) {
+  LoginAttempt *freeSlot = nullptr;
+  LoginAttempt *oldest = &g_attempts[0];
+
+  for (size_t i = 0; i < LM_AUTH_CLIENTS; i++) {
+    LoginAttempt &entry = g_attempts[i];
+    if (!entry.used) {
+      if (freeSlot == nullptr) {
+        freeSlot = &entry;
+      }
+      continue;
+    }
+    if (entry.ip == ip) {
+      const bool blockExpired =
+          entry.blockedUntil == 0 ||
+          (int32_t)(now - entry.blockedUntil) >= 0;
+      if (blockExpired &&
+          (uint32_t)(now - entry.windowStart) >= LM_LOGIN_WINDOW_MS) {
+        entry.failures = 0;
+        entry.windowStart = now;
+        entry.blockedUntil = 0;
+      }
+      return &entry;
+    }
+    if ((int32_t)(entry.windowStart - oldest->windowStart) < 0) {
+      oldest = &entry;
+    }
+  }
+
+  LoginAttempt *slot = freeSlot != nullptr ? freeSlot : oldest;
+  slot->used = true;
+  slot->ip = ip;
+  slot->failures = 0;
+  slot->windowStart = now;
+  slot->blockedUntil = 0;
+  return slot;
+}
+
+} // namespace
+
+bool authBegin() {
+  clearSessions();
+  clearAttempts();
+  loadAdmin();
+
+  if (g_admin.configured) {
+    g_setupWindowStarted = false;
+    Serial.printf("[auth] configured user=%s\n", g_admin.username.c_str());
+    return true;
+  }
+
+  startSetupWindow();
+  return true;
+}
+
+AuthResult authSetup(const String &username, const String &password,
+                     String &tokenOut, String &messageOut) {
+  tokenOut = "";
+  messageOut = "";
+
+  if (g_admin.configured) {
+    messageOut = "el hub ya esta configurado";
+    return AuthResult::AlreadyConfigured;
+  }
+  if (!authSetupOpen()) {
+    messageOut = "la ventana de setup esta cerrada; reinicia el hub";
+    return AuthResult::SetupClosed;
+  }
+
+  String user = username;
+  user.trim();
+  if (!validUsername(user)) {
+    messageOut = "usuario invalido: 3-32 letras, numeros, punto, guion o _";
+    return AuthResult::InvalidInput;
+  }
+  if (!validPassword(password)) {
+    messageOut = "contrasena invalida: 8-64 caracteres imprimibles";
+    return AuthResult::InvalidInput;
+  }
+
+  uint8_t salt[kSaltLen];
+  esp_fill_random(salt, sizeof(salt));
+
+  const uint32_t iterations = LM_PBKDF2_ITERATIONS;
+  const String hashHex = hashPassword(password, salt, sizeof(salt), iterations);
+  uint8_t hash[kHashLen] = {0};
+  if (!hexToBytes(hashHex, hash, sizeof(hash))) {
+    messageOut = "error interno al generar el hash";
+    return AuthResult::InternalError;
+  }
+
+  if (!saveAdmin(user, salt, sizeof(salt), hash, sizeof(hash), iterations)) {
+    messageOut = "no se pudo guardar la configuracion";
+    return AuthResult::InternalError;
+  }
+
+  g_admin.configured = true;
+  g_admin.username = user;
+  g_admin.iterations = iterations;
+  memcpy(g_admin.salt, salt, sizeof(salt));
+  memcpy(g_admin.hash, hash, sizeof(hash));
+  g_setupWindowStarted = false;
+
+  tokenOut = createSession(user);
+  Serial.printf("[auth] setup complete user=%s\n", user.c_str());
+  return AuthResult::Ok;
+}
+
+AuthResult authLogin(const String &username, const String &password,
+                     const IPAddress &clientIp, String &tokenOut,
+                     String &messageOut, uint32_t &retryAfterOut) {
+  tokenOut = "";
+  messageOut = "";
+  retryAfterOut = 0;
+
+  if (!g_admin.configured) {
+    messageOut = "el hub no esta configurado";
+    return AuthResult::NotConfigured;
+  }
+
+  const uint32_t now = millis();
+  LoginAttempt *attempt = findAttempt(clientIp, now);
+  if (attempt->blockedUntil != 0 &&
+      (int32_t)(now - attempt->blockedUntil) < 0) {
+    retryAfterOut = (attempt->blockedUntil - now + 999) / 1000;
+    messageOut = "demasiados intentos; espera un momento";
+    return AuthResult::RateLimited;
+  }
+
+  if (password.length() == 0 || password.length() > 128) {
+    attempt->failures = (uint8_t)(attempt->failures + 1);
+    messageOut = "usuario o contrasena incorrectos";
+    if (attempt->failures >= LM_LOGIN_MAX_ATTEMPTS) {
+      attempt->blockedUntil = now + LM_LOGIN_BLOCK_MS;
+      retryAfterOut = LM_LOGIN_BLOCK_MS / 1000;
+      return AuthResult::RateLimited;
+    }
+    return AuthResult::InvalidCredentials;
+  }
+
+  String user = username;
+  user.trim();
+
+  const String computed =
+      hashPassword(password, g_admin.salt, sizeof(g_admin.salt),
+                   g_admin.iterations);
+  const String stored = bytesToHex(g_admin.hash, sizeof(g_admin.hash));
+
+  const bool userOk = constantTimeEquals(user, g_admin.username);
+  const bool passOk = constantTimeEquals(computed, stored);
+
+  if (!userOk || !passOk) {
+    attempt->failures = (uint8_t)(attempt->failures + 1);
+    if (attempt->windowStart == 0) {
+      attempt->windowStart = now;
+    }
+    Serial.printf("[auth] login failed ip=%s\n",
+                  clientIp.toString().c_str());
+    if (attempt->failures >= LM_LOGIN_MAX_ATTEMPTS) {
+      attempt->blockedUntil = now + LM_LOGIN_BLOCK_MS;
+      retryAfterOut = LM_LOGIN_BLOCK_MS / 1000;
+      messageOut = "demasiados intentos; espera un momento";
+      return AuthResult::RateLimited;
+    }
+    messageOut = "usuario o contrasena incorrectos";
+    return AuthResult::InvalidCredentials;
+  }
+
+  attempt->used = false;
+  attempt->failures = 0;
+  attempt->blockedUntil = 0;
+
+  tokenOut = createSession(g_admin.username);
+  Serial.printf("[auth] login ok user=%s ip=%s\n", g_admin.username.c_str(),
+                clientIp.toString().c_str());
+  return AuthResult::Ok;
+}
+
+bool authLogout(const String &token) {
+  if (token.length() == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < LM_SESSION_MAX; i++) {
+    if (g_sessions[i].used && constantTimeEquals(g_sessions[i].token, token)) {
+      g_sessions[i].used = false;
+      g_sessions[i].token = "";
+      g_sessions[i].username = "";
+      return true;
+    }
+  }
+  return false;
+}
+
+AuthSessionInfo authCheckSession(const String &token) {
+  AuthSessionInfo info;
+  if (token.length() != kTokenHexLen) {
+    return info;
+  }
+
+  const uint32_t now = millis();
+  for (size_t i = 0; i < LM_SESSION_MAX; i++) {
+    Session &session = g_sessions[i];
+    if (!session.used) {
+      continue;
+    }
+    if ((uint32_t)(now - session.createdAt) >= LM_SESSION_TTL_MS) {
+      session.used = false;
+      session.token = "";
+      session.username = "";
+      continue;
+    }
+    if (constantTimeEquals(session.token, token)) {
+      session.lastSeenAt = now;
+      info.valid = true;
+      info.username = session.username;
+      info.ageSeconds = (now - session.createdAt) / 1000;
+      return info;
+    }
+  }
+  return info;
+}
+
+bool authConfigured() { return g_admin.configured; }
+
+bool authSetupOpen() {
+  if (g_admin.configured || !g_setupWindowStarted) {
+    return false;
+  }
+  return (uint32_t)(millis() - g_setupOpenedAt) < LM_SETUP_WINDOW_MS;
+}
+
+uint32_t authSetupSecondsLeft() {
+  if (!authSetupOpen()) {
+    return 0;
+  }
+  const uint32_t elapsed = millis() - g_setupOpenedAt;
+  const uint32_t left = LM_SETUP_WINDOW_MS - elapsed;
+  return (left + 999) / 1000;
+}
+
+String authExtractToken(const String &cookieHeader) {
+  if (cookieHeader.length() == 0) {
+    return String();
+  }
+
+  const String name = String(LM_SESSION_COOKIE) + "=";
+  int start = 0;
+  while (start < (int)cookieHeader.length()) {
+    int end = cookieHeader.indexOf(';', start);
+    if (end < 0) {
+      end = cookieHeader.length();
+    }
+    String part = cookieHeader.substring(start, end);
+    part.trim();
+    if (part.startsWith(name)) {
+      return part.substring(name.length());
+    }
+    start = end + 1;
+  }
+  return String();
+}
+
+String authBuildSetCookie(const String &token, bool clear) {
+  String cookie = String(LM_SESSION_COOKIE) + "=";
+  if (!clear) {
+    cookie += token;
+  }
+  cookie += "; Path=/; HttpOnly; SameSite=Lax; Max-Age=";
+  cookie += clear ? "0" : String((unsigned long)(LM_SESSION_TTL_MS / 1000));
+  if (clear) {
+    cookie += "; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+  }
+  return cookie;
+}

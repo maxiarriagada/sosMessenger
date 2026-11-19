@@ -1,0 +1,48 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          cache: true
+
+      - name: Show versions
+        run: |
+          flutter --version
+          xcodebuild -version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build unsigned iOS app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          cd build/ios/iphoneos
+          rm -rf Payload
+          mkdir Payload
+          ditto Runner.app Payload/Runner.app
+          zip -qry ../ios-unsigned.ipa Payload
+          ls -lh ../ios-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: mobile/build/ios/ios-unsigned.ipa
+          if-no-files-found: error

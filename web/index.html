@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0b0f14">
+    <meta name="description" content="LoRa Messenger: monitor GPS y chat por BLE">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="LoRa Messenger">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./icons/icon-180.png">
+    <link rel="stylesheet" href="./vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="./styles.css">
+    <title>LoRa Messenger</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">LM</div>
+          <div class="brand-text">
+            <h1>LoRa Messenger</h1>
+            <p id="connectionSubtitle">Sin conexión</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span id="connBadge" class="badge badge-muted">Desconectado</span>
+          <button id="disconnectBtn" class="icon-btn" type="button" hidden>Desconectar</button>
+        </div>
+      </header>
+
+      <main class="app-main">
+        <section id="supportBanner" class="banner banner-warning" hidden>
+          <div>
+            <strong>Web Bluetooth no disponible</strong>
+            <p>Este navegador no expone Bluetooth. En iPhone abrí esta PWA con Bluefy o usá la extensión iOSWebBLE.</p>
+          </div>
+          <a class="btn btn-small" href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noreferrer">Abrir Bluefy</a>
+        </section>
+
+        <section id="iosBanner" class="banner banner-info" hidden>
+          <div>
+            <strong>Estás en Safari iOS</strong>
+            <p>Safari no soporta Web Bluetooth. Copiá esta URL y abrila en Bluefy para conectar el nodo LM.</p>
+          </div>
+          <a class="btn btn-small" href="https://apps.apple.com/app/bluefy-web-ble-browser/id1492822055" target="_blank" rel="noreferrer">Abrir Bluefy</a>
+        </section>
+
+        <section id="installBanner" class="banner banner-info" hidden>
+          <div>
+            <strong>Instalar app</strong>
+            <p>Agregá LoRa Messenger a la pantalla de inicio para usarla como app.</p>
+          </div>
+          <button id="installBtn" class="btn btn-small" type="button">Instalar</button>
+        </section>
+
+        <section id="monitorView" class="view">
+          <article class="card" id="connectionCard">
+            <div class="card-head">
+              <div>
+                <h2>Conexión BLE</h2>
+                <p class="muted" id="connectionDetail">Conectá el nodo LM por Bluetooth</p>
+              </div>
+              <span id="connectionState" class="badge badge-muted">Sin conexión</span>
+            </div>
+            <div class="button-row">
+              <button id="connectBtn" class="btn btn-primary" type="button">Buscar nodo LM</button>
+              <button id="disconnectBtn2" class="btn" type="button" hidden>Desconectar</button>
+            </div>
+            <div id="grantedDevices" class="granted-devices" hidden>
+              <p class="muted small">Dispositivos ya autorizados</p>
+              <div id="grantedList" class="stack"></div>
+            </div>
+            <p id="connectionError" class="error-text" hidden></p>
+          </article>
+
+          <article class="card" id="nodeCard" hidden>
+            <div class="card-head">
+              <div>
+                <h2>Estado del nodo</h2>
+                <p class="muted" id="nodeUpdated">Esperando status...</p>
+              </div>
+              <span id="fixBadge" class="badge badge-muted">SIN FIX</span>
+            </div>
+            <div class="info-grid" id="nodeInfo"></div>
+          </article>
+
+          <article class="card" id="gpsCard">
+            <div class="card-head">
+              <div>
+                <h2>GPS del teléfono</h2>
+                <p class="muted">Ubicación del navegador hacia el nodo</p>
+              </div>
+              <span id="gpsBadge" class="badge badge-muted">DETENIDO</span>
+            </div>
+            <div class="button-row">
+              <button id="gpsBtn" class="btn btn-primary" type="button">Iniciar GPS</button>
+              <button id="compassBtn" class="btn" type="button">Activar brújula</button>
+            </div>
+            <div class="info-grid" id="gpsInfo"></div>
+            <p id="gpsError" class="error-text" hidden></p>
+            <p class="muted small" id="gpsNote" hidden>El GPS está activo, pero no hay nodo BLE conectado.</p>
+            <p class="muted small">En segundo plano el navegador puede suspender la ubicación.</p>
+          </article>
+
+          <article class="card" id="mapCard">
+            <div class="card-head">
+              <div>
+                <h2>Mapa OpenStreetMap</h2>
+                <p class="muted" id="mapHint">Activá el GPS del teléfono o conectá un nodo con fix.</p>
+              </div>
+              <button id="mapCenterBtn" class="icon-btn" type="button">Centrar</button>
+            </div>
+            <div id="mapEmpty" class="map-empty">Todavía no hay posiciones para mostrar.</div>
+            <div id="map" class="map" hidden></div>
+            <p class="muted small">© OpenStreetMap contributors · Necesita conexión a Internet.</p>
+          </article>
+
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h2>Peers vía LoRa</h2>
+                <p class="muted" id="peersUpdated">Sin snapshot</p>
+              </div>
+              <span id="peersBadge" class="badge badge-muted">0</span>
+            </div>
+            <div id="peersList" class="stack"></div>
+          </article>
+
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <h2>Evento</h2>
+                <p class="muted" id="eventText">Listo</p>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section id="chatView" class="view" hidden>
+          <article class="card composer-card">
+            <div class="card-head">
+              <div>
+                <h2>Mensajes</h2>
+                <p class="muted" id="chatMeta">0 mensajes</p>
+              </div>
+              <button id="clearChatBtn" class="icon-btn" type="button" disabled>Borrar historial</button>
+            </div>
+            <label class="switch-row">
+              <span>
+                <strong>Broadcast a todos</strong>
+                <small>El mensaje se retransmite por el hub</small>
+              </span>
+              <input id="broadcastToggle" type="checkbox" checked>
+            </label>
+            <label id="targetRow" class="field" hidden>
+              <span>Destino</span>
+              <select id="targetSelect"></select>
+            </label>
+            <p id="targetHint" class="muted small" hidden>Sin peers en el snapshot del hub.</p>
+            <label class="field">
+              <span>Mensaje</span>
+              <textarea id="messageInput" rows="2" maxlength="360" placeholder="Escribe un mensaje..."></textarea>
+            </label>
+            <div class="composer-actions">
+              <span id="byteCounter" class="muted small">0 / 180 bytes</span>
+              <button id="sendBtn" class="btn btn-primary" type="button" disabled>Enviar</button>
+            </div>
+          </article>
+          <div id="chatList" class="chat-list"></div>
+        </section>
+      </main>
+
+      <nav class="bottom-nav" aria-label="Navegación principal">
+        <button id="monitorTab" class="nav-btn active" type="button" data-tab="monitor">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="3" width="8" height="8" rx="2"></rect>
+            <rect x="13" y="3" width="8" height="8" rx="2"></rect>
+            <rect x="3" y="13" width="8" height="8" rx="2"></rect>
+            <rect x="13" y="13" width="8" height="8" rx="2"></rect>
+          </svg>
+          <span>Monitor</span>
+        </button>
+        <button id="chatTab" class="nav-btn" type="button" data-tab="chat">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"></path>
+          </svg>
+          <span>Mensajes</span>
+          <span id="chatBadge" class="nav-badge" hidden>0</span>
+        </button>
+      </nav>
+    </div>
+    <div id="toast" class="toast" hidden></div>
+    <script src="./vendor/leaflet/leaflet.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
