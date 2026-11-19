@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'ble/lm_ble_service.dart';
 import 'ble/lm_packets.dart';
@@ -27,6 +29,7 @@ class _LmHomePageState extends State<LmHomePage> {
   StreamSubscription<LmTextAck>? _textAckSub;
 
   bool _background = false;
+  bool _keepScreenOn = false;
   bool _streaming = false;
   bool _sending = false;
   int _tab = 0;
@@ -40,6 +43,7 @@ class _LmHomePageState extends State<LmHomePage> {
   void initState() {
     super.initState();
     unawaited(_chat.load());
+    unawaited(_loadKeepScreenOn());
     _textSub = _ble.textMessages.listen(_chat.addIncoming);
     _textAckSub = _ble.textAcks.listen(_chat.applyAck);
   }
@@ -50,6 +54,7 @@ class _LmHomePageState extends State<LmHomePage> {
     _textAckSub?.cancel();
     _chat.dispose();
     _location.stop();
+    unawaited(WakelockPlus.disable());
     _ble.dispose();
     super.dispose();
   }
@@ -105,6 +110,16 @@ class _LmHomePageState extends State<LmHomePage> {
         background = false;
         setState(() => _background = false);
         _showMessage('Sin permiso de segundo plano; GPS en primer plano');
+      } else {
+        final battery = await LmPermissions.ensureBatteryOptimization();
+        if (!mounted) {
+          return;
+        }
+        if (!battery) {
+          _showMessage(
+            'Segundo plano: permití "Sin restricciones" en batería',
+          );
+        }
       }
     }
 
@@ -143,6 +158,41 @@ class _LmHomePageState extends State<LmHomePage> {
     if (_streaming) {
       await _startGps();
     }
+  }
+
+  Future<void> _loadKeepScreenOn() async {
+    final prefs = await SharedPreferences.getInstance();
+    final enabled = prefs.getBool('lm_keep_screen_on_v1') ?? false;
+    if (!mounted) {
+      return;
+    }
+    setState(() => _keepScreenOn = enabled);
+    if (enabled) {
+      await WakelockPlus.enable();
+    }
+  }
+
+  Future<void> _setKeepScreenOn(bool value) async {
+    setState(() => _keepScreenOn = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('lm_keep_screen_on_v1', value);
+    if (value) {
+      await WakelockPlus.enable();
+    } else {
+      await WakelockPlus.disable();
+    }
+  }
+
+  Future<void> _requestBatteryExemption() async {
+    final granted = await LmPermissions.ensureBatteryOptimization();
+    if (!mounted) {
+      return;
+    }
+    _showMessage(
+      granted
+          ? 'Sin restricciones de batería para segundo plano'
+          : 'Permití "Sin restricciones" para el segundo plano',
+    );
   }
 
   Future<void> _onPosition(Position position) async {
@@ -443,6 +493,15 @@ class _LmHomePageState extends State<LmHomePage> {
               value: _background,
               onChanged: _setBackground,
             ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Mantener pantalla encendida'),
+              subtitle: const Text(
+                'Útil para el mapa y la brújula en primer plano',
+              ),
+              value: _keepScreenOn,
+              onChanged: _setKeepScreenOn,
+            ),
             const SizedBox(height: 4),
             Row(
               children: [
@@ -456,6 +515,11 @@ class _LmHomePageState extends State<LmHomePage> {
                   TextButton(
                     onPressed: LmPermissions.openSettings,
                     child: const Text('Ajustes'),
+                  ),
+                if (_background)
+                  TextButton(
+                    onPressed: _requestBatteryExemption,
+                    child: const Text('Batería'),
                   ),
               ],
             ),

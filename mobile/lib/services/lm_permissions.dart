@@ -43,5 +43,17 @@ class LmPermissions {
     return status.isGranted;
   }
 
+  static Future<bool> ensureBatteryOptimization() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    final status = await Permission.ignoreBatteryOptimizations.status;
+    if (status.isGranted) {
+      return true;
+    }
+    final result = await Permission.ignoreBatteryOptimizations.request();
+    return result.isGranted;
+  }
+
   static Future<bool> openSettings() => openAppSettings();
 }

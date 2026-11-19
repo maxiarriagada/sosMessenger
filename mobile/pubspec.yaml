@@ -39,6 +39,7 @@ dependencies:
   geolocator: ^14.1.2
   permission_handler: ^13.0.2
   shared_preferences: ^2.5.3
+  wakelock_plus: ^1.2.10
 
 dev_dependencies:
   flutter_test:
