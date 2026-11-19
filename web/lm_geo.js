@@ -110,6 +110,20 @@ export function formatDistance(lat1, lon1, lat2, lon2) {
   return formatMeters(distanceMeters(lat1, lon1, lat2, lon2));
 }
 
+export function routeInfo(origin, target, heading) {
+  const distance = distanceMeters(origin?.lat, origin?.lon, target?.lat, target?.lon);
+  const bearing = bearingDegrees(origin?.lat, origin?.lon, target?.lat, target?.lon);
+  const relative = relativeBearing(bearing, heading);
+  return {
+    distance,
+    bearing,
+    relative,
+    distanceText: formatMeters(distance),
+    headingText: formatHeading(bearing),
+    relativeText: formatRelative(relative),
+  };
+}
+
 export function formatRelative(value) {
   const relative = normalizeSigned(value);
   if (!Number.isFinite(relative)) {

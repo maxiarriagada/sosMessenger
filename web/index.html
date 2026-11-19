@@ -118,11 +118,40 @@
                 <h2>Mapa OpenStreetMap</h2>
                 <p class="muted" id="mapHint">Activá el GPS del teléfono o conectá un nodo con fix.</p>
               </div>
-              <button id="mapCenterBtn" class="icon-btn" type="button">Centrar</button>
+              <div class="header-actions map-actions">
+                <label class="map-toggle" title="Muestra todos los peers con fix">
+                  <input id="showAllNodes" type="checkbox">
+                  <span>Ver todos</span>
+                </label>
+                <button id="mapCenterBtn" class="icon-btn" type="button">Centrar</button>
+              </div>
             </div>
             <div id="mapEmpty" class="map-empty">Todavía no hay posiciones para mostrar.</div>
             <div id="map" class="map" hidden></div>
             <p class="muted small">© OpenStreetMap contributors · Necesita conexión a Internet.</p>
+          </article>
+
+          <article class="card" id="navCard">
+            <div class="card-head">
+              <div>
+                <h2>Navegación / Rumbo</h2>
+                <p class="muted" id="navHint">Elegí un objetivo con fix</p>
+              </div>
+              <span id="navBadge" class="badge badge-muted">SIN DATOS</span>
+            </div>
+            <label class="field">
+              <span>Objetivo</span>
+              <select id="navTargetSelect"></select>
+            </label>
+            <div class="nav-body">
+              <div class="compass" id="navCompass" aria-hidden="true">
+                <span class="compass-n">N</span>
+                <span class="compass-needle" id="navNeedle"></span>
+                <span class="compass-center"></span>
+              </div>
+              <div class="nav-info" id="navInfo"></div>
+            </div>
+            <p id="navEmpty" class="muted small" hidden></p>
           </article>
 
           <article class="card">

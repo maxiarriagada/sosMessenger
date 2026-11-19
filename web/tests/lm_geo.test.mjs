@@ -11,6 +11,7 @@ import {
   normalizeHeading,
   normalizeSigned,
   relativeBearing,
+  routeInfo,
 } from '../lm_geo.js';
 
 const closeTo = (actual, expected, tolerance = 0.001) => {
@@ -82,4 +83,22 @@ test('formatRelative describes left, right, front and behind', () => {
   assert.equal(formatRelative(-45), '45° izq.');
   assert.equal(formatRelative(180), 'atrás');
   assert.equal(formatRelative(NaN), '—');
+});
+
+test('routeInfo combines distance, bearing and relative heading', () => {
+  const route = routeInfo({ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, 0);
+  closeTo(route.distance, 111194.93, 1);
+  closeTo(route.bearing, 90, 0.001);
+  closeTo(route.relative, 90, 0.001);
+  assert.equal(route.distanceText, '111.19 km');
+  assert.equal(route.headingText, '90° E');
+  assert.equal(route.relativeText, '90° der.');
+});
+
+test('routeInfo tolerates missing positions', () => {
+  const route = routeInfo(null, null, null);
+  assert.equal(route.distanceText, '');
+  assert.equal(route.headingText, '—');
+  assert.equal(route.relativeText, '—');
+  assert.ok(Number.isNaN(route.bearing));
 });

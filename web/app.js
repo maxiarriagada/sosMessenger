@@ -7,6 +7,7 @@ import {
   formatRelative,
   normalizeHeading,
   relativeBearing,
+  routeInfo,
 } from './lm_geo.js';
 import {
   LM_TEXT_FLAG_BROADCAST,
@@ -54,6 +55,10 @@ const state = {
   mapMarkers: new Map(),
   mapPoints: [],
   mapHasCentered: false,
+  navTarget: loadPreference('lm_nav_target_v1', null),
+  showAllNodes: loadPreference('lm_show_all_nodes_v1', false),
+  navSignature: '',
+  navLine: null,
   nodeIdentity: null,
   unread: 0,
   notifySupported: typeof Notification !== 'undefined',
@@ -96,6 +101,19 @@ function bindEvents() {
   $('gpsBtn').addEventListener('click', toggleGps);
   $('compassBtn').addEventListener('click', toggleCompass);
   $('mapCenterBtn').addEventListener('click', () => centerMap(true));
+  $('navTargetSelect').addEventListener('change', (event) => {
+    state.navTarget = event.target.value || null;
+    savePreference('lm_nav_target_v1', state.navTarget);
+    const snapshot = ble.snapshot();
+    renderNavigation(snapshot);
+    renderMap(snapshot);
+  });
+  $('showAllNodes').addEventListener('change', (event) => {
+    state.showAllNodes = event.target.checked;
+    savePreference('lm_show_all_nodes_v1', state.showAllNodes);
+    renderMap(ble.snapshot());
+    centerMap(true);
+  });
   $('broadcastToggle').addEventListener('change', (event) => {
     state.broadcast = event.target.checked;
     renderChatMeta();
@@ -262,6 +280,7 @@ function render() {
   renderNode(snapshot);
   renderGps();
   renderPeers(snapshot);
+  renderNavigation(snapshot);
   renderStaleBanner(snapshot);
   renderMap(snapshot);
   renderEvent(snapshot);
@@ -383,6 +402,7 @@ function renderFreshness() {
   const snapshot = ble.snapshot();
   renderNode(snapshot);
   renderPeers(snapshot);
+  renderNavigation(snapshot);
   renderStaleBanner(snapshot);
 }
 
@@ -588,11 +608,180 @@ function renderPeers(snapshot) {
   }
 }
 
+function findNavTarget(snapshot) {
+  if (!state.navTarget) {
+    return null;
+  }
+  return (snapshot.peers || []).find((peer) => peer.id === state.navTarget) || null;
+}
+
+function formatCoords(point) {
+  if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lon)) {
+    return '—';
+  }
+  return `${point.lat.toFixed(5)}, ${point.lon.toFixed(5)}`;
+}
+
+function formatFixAge(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms)) {
+    return '—';
+  }
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return seconds === 0 ? 'ahora' : `hace ${seconds} s`;
+}
+
+function peerOptionLabel(peer, origin) {
+  const parts = [peer.id ? `LM-${peer.id}` : 'LM', sourceName(peer.gpsSource)];
+  const route = routeInfo(origin, peer, null);
+  if (route.distanceText) {
+    parts.push(route.distanceText, route.headingText);
+  }
+  parts.push(formatFixAge(peer.fixAgeMs));
+  return parts.join(' · ');
+}
+
+function navRoute(label, origin, target, heading, primary) {
+  const route = routeInfo(origin, target, heading);
+  const item = document.createElement('div');
+  item.className = `nav-route${primary ? ' nav-route-primary' : ''}`;
+  const title = document.createElement('strong');
+  title.textContent = label;
+  const value = document.createElement('span');
+  if (!route.distanceText) {
+    value.textContent = 'Sin posición';
+  } else {
+    const parts = [route.distanceText, route.headingText];
+    if (Number.isFinite(route.relative)) {
+      parts.push(route.relativeText);
+    }
+    value.textContent = parts.join(' · ');
+  }
+  item.append(title, value);
+  return item;
+}
+
+function renderNavigation(snapshot) {
+  const peers = (snapshot.peers || []).filter((peer) => peer && peer.id);
+  const select = $('navTargetSelect');
+  const ids = peers.map((peer) => peer.id);
+  if (state.navTarget && !ids.includes(state.navTarget)) {
+    ids.unshift(state.navTarget);
+  }
+  const signature = ids.join('|');
+  if (signature !== state.navSignature) {
+    state.navSignature = signature;
+    clear(select);
+    for (const id of ids) {
+      const option = document.createElement('option');
+      option.value = id;
+      select.append(option);
+    }
+  }
+  if (!state.navTarget && peers.length > 0) {
+    state.navTarget = peers[0].id;
+    savePreference('lm_nav_target_v1', state.navTarget);
+  }
+  for (const option of Array.from(select.options)) {
+    const peer = peers.find((item) => item.id === option.value);
+    option.textContent = peer
+      ? peerOptionLabel(peer, state.lastFix)
+      : `LM-${option.value} · sin datos`;
+  }
+  select.value = state.navTarget || '';
+  select.disabled = ids.length === 0;
+  $('showAllNodes').checked = state.showAllNodes;
+
+  const target = findNavTarget(snapshot);
+  const node = snapshot.status;
+  const nodePosition =
+    node?.hasFix && Number.isFinite(node.lat) && Number.isFinite(node.lon) ? node : null;
+  const targetPosition =
+    target?.hasFix && Number.isFinite(target.lat) && Number.isFinite(target.lon) ? target : null;
+  const route = routeInfo(state.lastFix, targetPosition, state.heading);
+  const empty = $('navEmpty');
+  const info = $('navInfo');
+  clear(info);
+
+  if (!target) {
+    setBadge($('navBadge'), 'SIN OBJETIVO', 'muted');
+    $('navHint').textContent = 'Sin peers en la red.';
+    empty.hidden = false;
+    empty.textContent = 'Conectá el nodo para ver objetivos disponibles.';
+    $('navCompass').classList.add('compass-empty');
+    $('navNeedle').style.transform = 'translate(-50%, -100%) rotate(0deg)';
+    return;
+  }
+
+  empty.hidden = true;
+  const label = `LM-${target.id}`;
+  $('navHint').textContent = targetPosition
+    ? `${label} · ${sourceName(target.gpsSource)}`
+    : `${label} · sin fix`;
+  if (!targetPosition) {
+    setBadge($('navBadge'), 'SIN FIX', 'warn');
+  } else if (!route.distanceText) {
+    setBadge($('navBadge'), 'SIN GPS', 'warn');
+  } else {
+    setBadge($('navBadge'), 'LISTO', 'ok');
+  }
+  info.append(
+    navRoute('Tu celular → objetivo', state.lastFix, targetPosition, state.heading, true),
+    navRoute(
+      node ? `Nodo ${node.nodeId || 'LM'} → objetivo` : 'Nodo → objetivo',
+      nodePosition,
+      targetPosition,
+      null,
+      false,
+    ),
+    infoItem('Tu celular', formatCoords(state.lastFix)),
+    infoItem('Objetivo', formatCoords(targetPosition)),
+    infoItem('Edad fix objetivo', formatFixAge(target.fixAgeMs)),
+  );
+  if (!state.lastFix) {
+    empty.hidden = false;
+    empty.textContent = 'Iniciá el GPS del teléfono para calcular el rumbo exacto al objetivo.';
+  } else if (!targetPosition) {
+    empty.hidden = false;
+    empty.textContent = 'El objetivo no tiene fix de posición.';
+  }
+  const angle = Number.isFinite(state.heading) ? route.relative : route.bearing;
+  $('navCompass').classList.toggle('compass-empty', !Number.isFinite(angle));
+  $('navNeedle').style.transform = `translate(-50%, -100%) rotate(${Number.isFinite(angle) ? angle : 0}deg)`;
+}
+
 function renderMap(snapshot) {
   const points = [];
+  const ids = new Set();
   const status = snapshot.status;
+  const target = findNavTarget(snapshot);
+  const addPoint = (point) => {
+    if (!point || ids.has(point.id)) {
+      return;
+    }
+    ids.add(point.id);
+    points.push(point);
+  };
+  const addPeerPoint = (peer) => {
+    if (
+      !peer?.hasFix ||
+      !Number.isFinite(peer.lat) ||
+      !Number.isFinite(peer.lon) ||
+      peer.id === status?.nodeId
+    ) {
+      return;
+    }
+    addPoint({
+      id: `peer:${peer.id}`,
+      kind: 'peer',
+      lat: peer.lat,
+      lon: peer.lon,
+      label: peerOptionLabel(peer, state.lastFix),
+    });
+  };
+
   if (state.lastFix) {
-    points.push({
+    addPoint({
       id: 'own',
       kind: 'own',
       lat: state.lastFix.lat,
@@ -606,7 +795,7 @@ function renderMap(snapshot) {
     Number.isFinite(status.lat) &&
     Number.isFinite(status.lon)
   ) {
-    points.push({
+    addPoint({
       id: `node:${status.nodeId || 'lm'}`,
       kind: 'node',
       lat: status.lat,
@@ -614,29 +803,29 @@ function renderMap(snapshot) {
       label: `Nodo ${status.nodeId || 'LM'} · ${sourceName(status.gpsSource)}`,
     });
   }
-  for (const peer of snapshot.peers || []) {
-    if (
-      !peer.hasFix ||
-      !Number.isFinite(peer.lat) ||
-      !Number.isFinite(peer.lon) ||
-      peer.id === status?.nodeId
-    ) {
-      continue;
+  addPeerPoint(target);
+  if (state.showAllNodes) {
+    for (const peer of snapshot.peers || []) {
+      addPeerPoint(peer);
     }
-    points.push({
-      id: `peer:${peer.id}`,
-      kind: 'peer',
-      lat: peer.lat,
-      lon: peer.lon,
-      label: `Peer ${peer.id} · ${sourceName(peer.gpsSource)}`,
-    });
   }
 
   state.mapPoints = points;
   const mapNode = $('map');
   const empty = $('mapEmpty');
   const hint = $('mapHint');
+  const clearObjects = () => {
+    for (const marker of state.mapMarkers.values()) {
+      marker.remove();
+    }
+    state.mapMarkers.clear();
+    if (state.navLine) {
+      state.navLine.remove();
+      state.navLine = null;
+    }
+  };
   if (points.length === 0) {
+    clearObjects();
     mapNode.hidden = true;
     empty.hidden = false;
     hint.textContent = 'Activá el GPS del teléfono o conectá un nodo con fix.';
@@ -645,9 +834,19 @@ function renderMap(snapshot) {
 
   mapNode.hidden = false;
   empty.hidden = true;
-  hint.textContent = `${points.length} posición${points.length === 1 ? '' : 'es'} en el mapa`;
+  const hintParts = [`${points.length} posición${points.length === 1 ? '' : 'es'} en el mapa`];
+  const targetPosition =
+    target?.hasFix && Number.isFinite(target.lat) && Number.isFinite(target.lon) ? target : null;
+  if (targetPosition) {
+    hintParts.push(`objetivo LM-${target.id}`);
+  }
+  if (state.showAllNodes) {
+    hintParts.push('todos los nodos');
+  }
+  hint.textContent = hintParts.join(' · ');
   const map = ensureMap();
   if (!map) {
+    clearObjects();
     mapNode.hidden = true;
     empty.hidden = false;
     empty.textContent = 'No se pudo cargar OpenStreetMap.';
@@ -671,6 +870,11 @@ function renderMap(snapshot) {
       state.mapMarkers.set(point.id, marker);
     } else {
       marker.setLatLng([point.lat, point.lon]);
+      if (typeof marker.setTooltipContent === 'function') {
+        marker.setTooltipContent(point.label);
+      } else {
+        marker.bindTooltip(point.label, { direction: 'top', offset: [0, -8] });
+      }
     }
   }
   for (const [id, marker] of state.mapMarkers) {
@@ -679,6 +883,30 @@ function renderMap(snapshot) {
       state.mapMarkers.delete(id);
     }
   }
+
+  if (state.lastFix && targetPosition) {
+    const route = routeInfo(state.lastFix, targetPosition, state.heading);
+    const latlngs = [
+      [state.lastFix.lat, state.lastFix.lon],
+      [targetPosition.lat, targetPosition.lon],
+    ];
+    if (!state.navLine) {
+      state.navLine = L.polyline(latlngs, {
+        className: 'nav-line',
+        color: '#5aa9ff',
+        weight: 3,
+        opacity: 0.9,
+        dashArray: '7 7',
+      }).addTo(map);
+    } else {
+      state.navLine.setLatLngs(latlngs);
+    }
+    state.navLine.bindTooltip(`${route.distanceText} · ${route.headingText}`, { sticky: true });
+  } else if (state.navLine) {
+    state.navLine.remove();
+    state.navLine = null;
+  }
+
   map.invalidateSize();
   if (!state.mapHasCentered) {
     centerMap(false);
@@ -917,8 +1145,10 @@ function stopCompass() {
   window.removeEventListener('deviceorientation', onOrientation, true);
   state.heading = null;
   state.headingSource = null;
+  const snapshot = ble.snapshot();
   renderGps();
-  renderPeers(ble.snapshot());
+  renderPeers(snapshot);
+  renderNavigation(snapshot);
 }
 
 function onOrientation(event) {
@@ -938,8 +1168,10 @@ function onOrientation(event) {
     return;
   }
   state.lastHeadingRender = now;
+  const snapshot = ble.snapshot();
   renderGps();
-  renderPeers(ble.snapshot());
+  renderPeers(snapshot);
+  renderNavigation(snapshot);
 }
 
 function startGps() {
@@ -1029,6 +1261,7 @@ function onPosition(position) {
   const snapshot = ble.snapshot();
   renderGps();
   renderPeers(snapshot);
+  renderNavigation(snapshot);
   renderMap(snapshot);
 }
 
@@ -1230,6 +1463,24 @@ function formatMs(value) {
     return `${(ms / 1000).toFixed(1)} s`;
   }
   return `${Math.round(ms)} ms`;
+}
+
+function loadPreference(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) {
+      return fallback;
+    }
+    return JSON.parse(raw) ?? fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function savePreference(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (_) {}
 }
 
 function isStandalone() {
